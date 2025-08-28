@@ -58,32 +58,44 @@ Das Skript:
 
 🔧 **Deinstallation**
 
-Falls Änderungen rückgängig gemacht werden sollen:
+Lade das Deinstallationsskript herunter:
 
 ```bash
-  sudo ./uninstall.sh           # entfernt WLAN + Audio
-sudo ./uninstall.sh --wifi    # nur WLAN-Dateien
-sudo ./uninstall.sh --audio   # nur DKMS-Audio   wget https://raw.githubusercontent.com/frogro/imac-linux-wifi-audio/main/uninstall.sh
+     wget https://raw.githubusercontent.com/frogro/imac-linux-wifi-audio/main/uninstall.sh
+```
 
+Du kannst wählen, welche Komponenten entfernt werden sollen:
 
+```bash
+     sudo ./uninstall.sh           # entfernt WLAN + Audio
+     sudo ./uninstall.sh --wifi    # nur WLAN-Dateien
+     sudo ./uninstall.sh --audio   # nur DKMS-Audio   
 ```
 
 ℹ️ **Hinweise**
 
 **WLAN:**
-Das Skript lädt die benötigte BCM4364-Firmware automatisch aus dem Release von reynaldliu/macbook16-1-wifi-bcm4364-binary. Beide Varianten (b2 und b3) werden installiert, der Kernel nutzt die richtige automatisch.
+Die benötigte BCM4364-Firmware stammt aus dem Github-Release <a href="https://github.com/reynaldliu/macbook16-1-wifi-bcm4364-binary" target="_blank">macbook16-1-wifi-bcm4364-binary</a> von ReynaldLiu. Beide Varianten (b2 und b3) werden installiert, der Kernel nutzt die richtige automatisch.
 
 **Audio:**
-Das CS8409-Modul wird via DKMS gebaut (Quellen von egorenar/snd-hda-codec-cs8409). Dadurch wird das Modul bei einem Kernel-Updates automatisch neu gebaut. Nutze ```bash sudo dkms status```, um die korrekte Einbindung des CS8409-Moduls zu prüfen. Das Skript aktiviert PipeWire (pipewire-pulse, wireplumber), installiert pavucontrol und weitere Abhängigkeiten (build-essential, dkms, pipewire).
+Das CS8409-Modul stammt aus dem GitHub-Release <a href="https://github.com/egorenar/snd-hda-codec-cs8409" target="_blank">snd-hda-codec-cs8409</a> von Alexander Egorenkov. Es wird via DKMS gebaut. Dadurch wird das Modul bei einem Kernel-Update automatisch neu gebaut. Nutze ```bash sudo dkms status```, um die korrekte Einbindung des CS8409-Moduls zu prüfen. Das Skript aktiviert PipeWire (pipewire-pulse, wireplumber), installiert pavucontrol und weitere Abhängigkeiten (build-essential, dkms, pipewire).
+
+ℹ️ **Troubelshooting**
+- **DKMS-Build schlägt fehl:** Log prüfen
+
+```bash
+     sudo tail -n +1 /var/lib/dkms/snd-hda-codec-cs8409/1.0/build/make.log
+```
+- **WLAN lädt nicht:**
+     Kernel & Headers passend (```bash uname -r, apt install linux-headers-$(uname -r)```)?
+     dmesg | grep brcmfmac
+  
+- **kein Audio**: Ausgabegerät in den Einstellungen > Audio festgelegt?
 
 📜 **Rechtliches / Lizenz** 
-
-- **WLAN-Firmware** wird **nicht** verteilt. Das Installationsskript lädt sie aus dem Release von **reynaldliu/macbook16-1-wifi-bcm4364-binary** herunter.
-- **CS8409-Quellen** stammen von **egorenar/snd-hda-codec-cs8409** und werden beim Installieren geladen.
 - Dieses Repo (Skripte/Packaging) steht unter **MIT-Lizenz** (siehe LICENSE).
-- Nutzung auf eigene Verantwortung; keine Garantie.
+- Nutzung auf eigene Verantwortung; keine Haftung, keine Garantie.
 
 🚀 **Credits**
 
-BCM4364 Binary Firmware: reynaldliu
-CS8409 Driver: egorenar
+BCM4364 Binary Firmware: reynaldliu, CS8409 Driver: egorenar
