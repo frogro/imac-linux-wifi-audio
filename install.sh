@@ -1,145 +1,190 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ------------------------------------------------------------
-# Pfade gemäß deiner Repo-Struktur (siehe Screenshot)
-# ------------------------------------------------------------
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# ---------------------------------------
+# iMac WiFi (BCM4364 b2/b3) + Audio (CS8409) Installer
+# - installiert optional WLAN-Firmware (b2 UND b3 parallel)
+# - baut & installiert DKMS-Modul für CS8409
+# - erzeugt Manifest zum späteren Uninstall
+# ---------------------------------------
 
-# Broadcom-FW:
-FIRMWARE_SRC_B2="$SCRIPT_DIR/broadcom/b2"
-FIRMWARE_SRC_B3="$SCRIPT_DIR/broadcom/b3"
-FIRMWARE_DST="/lib/firmware/brcm"
+# ---- Helpers
+log()  { echo -e "\033[1;34m==>\033[0m $*"; }
+ok()   { echo -e "\033[1;32m✔\033[0m $*"; }
+warn() { echo -e "\033[1;33m⚠\033[0m $*"; }
+err()  { echo -e "\033[1;31m✖\033[0m $*"; }
+die()  { err "$*"; exit 1; }
 
-# Cirrus-Codec (DKMS) – liegt direkt im Repo unter cirruslogic/
-AUDIO_SRC="$SCRIPT_DIR/cirruslogic"
-DKMS_NAME="snd-hda-codec-cs8409"
-DKMS_VER="1.0"
-DKMS_DST="/usr/src/${DKMS_NAME}-${DKMS_VER}"
-
-# ------------------------------------------------------------
-# Helfer
-# ------------------------------------------------------------
-say()    { printf "\033[33m==>\033[0m %s\n" "$*"; }
-ok()     { printf "\033[32m✔\033[0m %s\n" "$*"; }
-err()    { printf "\033[31m✖ %s\033[0m\n" "$*"; }
-needroot(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || { err "Bitte mit sudo/root ausführen."; exit 1; }; }
-
-install_pkgs() {
-  say "Pakete installieren…"
-  apt-get update -y
-  apt-get install -y --no-install-recommends \
-    curl wget unzip ca-certificates \
-    build-essential dkms linux-headers-$(uname -r) \
-    git make rsync \
-    pipewire pipewire-pulse wireplumber pavucontrol \
-    alsa-utils alsa-ucm-conf
-  ok "Pakete bereit."
-}
-
-copy_fw_set() {
-  local src="$1" label="$2"
-  [[ -d "$src" ]] || { err "Firmware-Quelle fehlt: $src"; return 1; }
-  install -d "$FIRMWARE_DST"
-
-  # Standard-Dateien
-  for f in brcmfmac4364*-pcie.bin brcmfmac4364*-pcie.clm_blob brcmfmac4364*-pcie.txcap_blob; do
-    compgen -G "$src/$f" > /dev/null && install -m0644 "$src"/$f "$FIRMWARE_DST/"
-  done
-  # Apple-Varianten (midway/borneo)
-  for f in brcmfmac4364*-pcie.apple,*; do
-    compgen -G "$src/$f" > /dev/null && install -m0644 "$src"/$f "$FIRMWARE_DST/"
-  done
-
-  ok "Firmware ($label) nach $FIRMWARE_DST kopiert."
-}
-
-install_wifi() {
-  say "WLAN-Firmware kopieren…"
-  copy_fw_set "$FIRMWARE_SRC_B2" "BCM4364 B2"
-  copy_fw_set "$FIRMWARE_SRC_B3" "BCM4364 B3"
-  if command -v update-initramfs >/dev/null 2>&1; then
-    update-initramfs -u || true
-  fi
-  ok "WLAN-Firmware installiert."
-}
-
-install_audio() {
-  say "Audio (Cirrus CS8409) via DKMS bauen & installieren…"
-
-  # Minimal-Check der Quellen
-  for f in dkms.conf Makefile patch_cs8409.c patch_cirrus_apple.h; do
-    [[ -f "$AUDIO_SRC/$f" ]] || { err "Datei fehlt: $AUDIO_SRC/$f"; exit 2; }
-  done
-
-  # Sauberer Zustand
-  dkms remove -m "$DKMS_NAME" -v "$DKMS_VER" --all >/dev/null 2>&1 || true
-  rm -rf "$DKMS_DST"
-  install -d "$DKMS_DST"
-
-  # Quellen in /usr/src spiegeln
-  rsync -a --delete "$AUDIO_SRC"/ "$DKMS_DST"/
-
-  # DKMS-Lebenszyklus
-  dkms add    -m "$DKMS_NAME" -v "$DKMS_VER"
-  dkms build  -m "$DKMS_NAME" -v "$DKMS_VER"
-  dkms install -m "$DKMS_NAME" -v "$DKMS_VER" --force
-
-  # Modul laden (falls möglich)
-  modprobe "$DKMS_NAME" || true
-  ok "Audio-Treiber installiert."
-}
-
-pipewire_hint() {
-  if [[ -z "${SUDO_USER:-}" ]]; then
-    say "Hinweis: PipeWire läuft als USER-Dienst. In deiner Desktop-Session prüfen mit:"
-    echo "   systemctl --user --type=service | grep -E 'pipewire|wireplumber'"
+require_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    die "Bitte mit sudo/root ausführen."
   fi
 }
 
-menu() {
-  echo
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST_DIR="/var/lib/imac-linux-wifi-audio"
+MANIFEST_FILE="$MANIFEST_DIR/manifest.txt"
+mkdir -p "$MANIFEST_DIR"
+
+# manifest append helper
+manifest_add() { echo "$1" >> "$MANIFEST_FILE"; }
+
+# ---- Auswahl
+ask_components() {
   echo "Welche Komponenten sollen installiert werden?"
   echo "  1) Nur WLAN"
   echo "  2) Nur Audio"
   echo "  3) WLAN + Audio (Standard)"
-  read -r -p "Auswahl [1-3]: " choice || true
+  read -rp "Auswahl [1-3]: " choice || true
   case "${choice:-3}" in
-    1) SELECTION="wifi"  ;;
-    2) SELECTION="audio" ;;
-    3|*) SELECTION="both";;
+    1) DO_WIFI=1; DO_AUDIO=0 ;;
+    2) DO_WIFI=0; DO_AUDIO=1 ;;
+    3|*) DO_WIFI=1; DO_AUDIO=1 ;;
   esac
+}
+
+# ---- Packages
+install_packages() {
+  log "Pakete installieren…"
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    curl wget unzip ca-certificates git rsync make \
+    build-essential dkms linux-headers-$(uname -r) \
+    pipewire pipewire-pulse wireplumber pavucontrol \
+    alsa-utils alsa-ucm-conf >/dev/null
+  ok "Pakete vorhanden."
+}
+
+# ---- WLAN: beide Revisionen b2 & b3 kopieren
+install_wifi() {
+  local fw_dest="/lib/firmware/brcm"
+  mkdir -p "$fw_dest"
+  : > "$MANIFEST_FILE"
+
+  log "WLAN-Firmware suchen (b2 & b3) und installieren…"
+
+  # Suche rekursiv im Repo nach allen relevanten Dateien
+  # (board-spezifische und generische Namen; b2 und b3)
+  mapfile -t found < <(
+    find "$SCRIPT_DIR" -type f \
+      \( -iname 'brcmfmac4364b2-pcie*' -o -iname 'brcmfmac4364b3-pcie*' \) \
+      -printf '%p\n' | sort
+  )
+
+  if [[ "${#found[@]}" -eq 0 ]]; then
+    die "Keine Firmware-Dateien (brcmfmac4364b[23]-pcie*) im Repo gefunden."
+  fi
+
+  local copied=0
+  for src in "${found[@]}"; do
+    local base="$(basename "$src")"
+    local dst="$fw_dest/$base"
+    install -m 0644 "$src" "$dst"
+    manifest_add "$dst"
+    ((copied++))
+  done
+
+  ok "Firmware-Dateien kopiert: $copied"
+  log "Hinweis: brcmfmac wählt automatisch die zum Board passende Datei."
+}
+
+# ---- Audio via DKMS (CS8409)
+install_audio() {
+  local mod_name="snd-hda-codec-cs8409"
+  local ver_default="1.0"
+
+  # Versuche die Quelle zu finden (flexibel nach Ordnernamen suchen)
+  # Übliche Pfade: dkms/snd-hda-codec-cs8409, driver/cs8409, audio/cs8409
+  local src_dir=""
+  for cand in \
+      "$SCRIPT_DIR/dkms/$mod_name" \
+      "$SCRIPT_DIR/dkms/${mod_name%-*}" \
+      "$SCRIPT_DIR/audio/$mod_name" \
+      "$SCRIPT_DIR/driver/$mod_name" \
+      "$SCRIPT_DIR/$mod_name"
+  do
+    [[ -d "$cand" ]] && src_dir="$cand" && break
+  done
+  [[ -n "$src_dir" ]] || die "CS8409-Quellen nicht gefunden. Erwarte z.B. $SCRIPT_DIR/dkms/$mod_name"
+
+  # Version aus dkms.conf lesen, falls vorhanden
+  local dkms_conf="$src_dir/dkms.conf"
+  local ver="$ver_default"
+  if [[ -f "$dkms_conf" ]]; then
+    # Suche nach PACKAGE_VERSION in dkms.conf
+    ver="$(awk -F'=' '/^PACKAGE_VERSION/ {gsub(/[ "\047]/,"",$2); print $2}' "$dkms_conf" | head -n1 || true)"
+    ver="${ver:-$ver_default}"
+  fi
+
+  local usr_src="/usr/src/${mod_name}-${ver}"
+
+  log "DKMS-Quelle nach $usr_src synchronisieren…"
+  rm -rf "$usr_src"
+  rsync -a --delete "$src_dir/" "$usr_src/"
+  manifest_add "$usr_src/#dkms-source"
+
+  # Workaround: Kernel 6.x Inkompatibilität (linein_jack_in -> mic_jack_in)
+  # nur anwenden, wenn das Symbol im Source vorkommt:
+  if grep -Rqs "linein_jack_in" "$usr_src"; then
+    log "Kompatibilitäts-Patch anwenden (linein_jack_in -> mic_jack_in)…"
+    sed -i 's/\blinein_jack_in\b/mic_jack_in/g' $(grep -RIl "linein_jack_in" "$usr_src")
+  fi
+
+  log "DKMS registrieren/neu bauen…"
+  # Vorherige Reste wegräumen (falls vorhanden)
+  if dkms status | grep -q "^${mod_name}/${ver}"; then
+    dkms remove -m "$mod_name" -v "$ver" --all || true
+  fi
+
+  dkms add -m "$mod_name" -v "$ver"
+  if ! dkms build -m "$mod_name" -v "$ver"; then
+    err "DKMS Build fehlgeschlagen."
+    local log_file="/var/lib/dkms/${mod_name}/${ver}/build/make.log"
+    [[ -f "$log_file" ]] && { echo "---- make.log (Tail) ----"; tail -n 200 "$log_file" || true; }
+    die "Abbruch."
+  fi
+  dkms install -m "$mod_name" -v "$ver"
+
+  ok "CS8409-DKMS installiert."
+}
+
+# ---- PipeWire versuchen zu aktivieren (best effort)
+enable_pipewire() {
+  log "PipeWire aktivieren (Best-Effort)…"
+  # Funktioniert nur im Userservice-Kontext; bei sudo ohne Session gibt's oft DBUS-Fehler.
+  # Deshalb hier nur versuchen, Fehler sind ok.
+  local user="${SUDO_USER:-$USER}"
+  if command -v loginctl >/dev/null 2>&1 && loginctl show-user "$user" >/dev/null 2>&1; then
+    # Versuche --machine user@.host
+    systemctl --machine="${user}"@.host --user enable --now pipewire pipewire-pulse wireplumber || true
+  else
+    warn "Konnte Benutzer-Session nicht ermitteln. Starte PipeWire nach dem Login automatisch."
+  fi
+}
+
+# ---- Zusammenfassung
+summary() {
   echo
-}
-
-manifest() {
-  local d="/var/lib/imac-linux-wifi-audio"
-  install -d "$d"
-  {
-    echo "timestamp: $(date -Is)"
-    echo "kernel: $(uname -r)"
-    echo "firmware_b2: $FIRMWARE_SRC_B2"
-    echo "firmware_b3: $FIRMWARE_SRC_B3"
-    echo "audio_src:   $AUDIO_SRC"
-    echo "dkms:        $DKMS_NAME/$DKMS_VER"
-  } > "$d/manifest.txt"
-  ok "Manifest: $d/manifest.txt"
-}
-
-main() {
-  needroot
-  menu
-  install_pkgs
-
-  case "$SELECTION" in
-    wifi) install_wifi ;;
-    audio) install_audio ;;
-    both) install_wifi; install_audio ;;
-  esac
-
-  pipewire_hint
   ok "Installation abgeschlossen."
-  manifest
+  echo "Manifest: $MANIFEST_FILE"
+  echo
+  echo "Nützlich:"
+  echo "  • Geladene WLAN-Firmware prüfen:  dmesg | grep -i brcmfmac"
+  echo "  • Audio-Module laden:             sudo modprobe snd_hda_intel"
+  echo "  • DKMS-Status:                    dkms status"
 }
 
-main "$@"
+# ---- main
+require_root
+ask_components
+install_packages
+
+if [[ "${DO_WIFI:-0}" -eq 1 ]]; then
+  install_wifi
+fi
+if [[ "${DO_AUDIO:-0}" -eq 1 ]]; then
+  install_audio
+  enable_pipewire
+fi
+
+summary
