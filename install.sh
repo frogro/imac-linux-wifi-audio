@@ -1,161 +1,145 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_WIFI_ZIP="https://github.com/reynaldliu/macbook16-1-wifi-bcm4364-binary/releases/download/v5.10.28-wifi/bcm4364_firmware.zip"
-REPO_CS8409_TAR="https://github.com/egorenar/snd-hda-codec-cs8409/archive/refs/heads/master.tar.gz"
+# ------------------------------------------------------------
+# Pfade gemäß deiner Repo-Struktur (siehe Screenshot)
+# ------------------------------------------------------------
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+# Broadcom-FW:
+FIRMWARE_SRC_B2="$SCRIPT_DIR/broadcom/b2"
+FIRMWARE_SRC_B3="$SCRIPT_DIR/broadcom/b3"
+FIRMWARE_DST="/lib/firmware/brcm"
+
+# Cirrus-Codec (DKMS) – liegt direkt im Repo unter cirruslogic/
+AUDIO_SRC="$SCRIPT_DIR/cirruslogic"
 DKMS_NAME="snd-hda-codec-cs8409"
 DKMS_VER="1.0"
-SRC_ROOT="/usr/src/${DKMS_NAME}-${DKMS_VER}"
-STATE_DIR="/var/lib/imac-linux-wifi-audio"
-MANIFEST="${STATE_DIR}/manifest.txt"
+DKMS_DST="/usr/src/${DKMS_NAME}-${DKMS_VER}"
 
-bail() { echo "ERROR: $*" >&2; exit 1; }
-need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || bail "Bitte mit sudo/root ausführen."; }
+# ------------------------------------------------------------
+# Helfer
+# ------------------------------------------------------------
+say()    { printf "\033[33m==>\033[0m %s\n" "$*"; }
+ok()     { printf "\033[32m✔\033[0m %s\n" "$*"; }
+err()    { printf "\033[31m✖ %s\033[0m\n" "$*"; }
+needroot(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || { err "Bitte mit sudo/root ausführen."; exit 1; }; }
 
-need_root
-mkdir -p "$STATE_DIR"
-echo "# Manifest for imac-linux-wifi-audio" >"$MANIFEST"
+install_pkgs() {
+  say "Pakete installieren…"
+  apt-get update -y
+  apt-get install -y --no-install-recommends \
+    curl wget unzip ca-certificates \
+    build-essential dkms linux-headers-$(uname -r) \
+    git make rsync \
+    pipewire pipewire-pulse wireplumber pavucontrol \
+    alsa-utils alsa-ucm-conf
+  ok "Pakete bereit."
+}
 
-if ! grep -qE '^(13|13\.)' /etc/debian_version 2>/dev/null; then
-  echo "WARN: Nicht Debian 13 erkannt. Ungetestet, kann aber funktionieren." | tee -a "$MANIFEST"
-fi
+copy_fw_set() {
+  local src="$1" label="$2"
+  [[ -d "$src" ]] || { err "Firmware-Quelle fehlt: $src"; return 1; }
+  install -d "$FIRMWARE_DST"
 
-# --- Auswahl ---
-echo
-echo "Welche Komponenten sollen installiert werden?"
-echo "  1) Nur WLAN"
-echo "  2) Nur Audio"
-echo "  3) WLAN + Audio (Standard)"
-read -rp "Auswahl [1-3]: " choice_raw || choice_raw=""
-choice="$(echo "${choice_raw:-}" | tr -cd '0-9')"
-case "${choice:-}" in
-  1|2|3) : ;;                   # gültig
-  *) echo "Hinweis: ungültige Eingabe -> Standard = 3 (WLAN+Audio)"; choice=3 ;;
-esac
+  # Standard-Dateien
+  for f in brcmfmac4364*-pcie.bin brcmfmac4364*-pcie.clm_blob brcmfmac4364*-pcie.txcap_blob; do
+    compgen -G "$src/$f" > /dev/null && install -m0644 "$src"/$f "$FIRMWARE_DST/"
+  done
+  # Apple-Varianten (midway/borneo)
+  for f in brcmfmac4364*-pcie.apple,*; do
+    compgen -G "$src/$f" > /dev/null && install -m0644 "$src"/$f "$FIRMWARE_DST/"
+  done
 
-# --- Pakete ---
-echo "==> Pakete installieren…"
-apt-get update -y
-apt-get install -y \
-  curl wget unzip ca-certificates \
-  build-essential dkms linux-headers-$(uname -r) \
-  git make rsync \
-  pipewire pipewire-pulse wireplumber pavucontrol \
-  alsa-utils alsa-ucm-conf
+  ok "Firmware ($label) nach $FIRMWARE_DST kopiert."
+}
 
-# --- WLAN ---
-if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
-  echo "==> WLAN-Firmware holen & installieren…"
-  TMP_WIFI="$(mktemp -d)"
-  pushd "$TMP_WIFI" >/dev/null
-  curl -L -o bcm4364_firmware.zip "$REPO_WIFI_ZIP"
-  unzip -o -q bcm4364_firmware.zip
-
-  install -d /lib/firmware/brcm
-  COPIED=()
-
-  pick_first_present() {
-    local base_dir="$1"; shift
-    for c in "$@"; do
-      if [ -f "${base_dir}/${c}.trx" ] && [ -f "${base_dir}/${c}.clmb" ] && [ -f "${base_dir}/${c}.txcb" ]; then
-        echo "$c"; return 0
-      fi
-    done
-    return 1
-  }
-
-  B2_DIR="bcm4364_drivers/wifi_firmware/C-4364__s-B2"
-  B2_CAND=("midway" "kauai" "nihau")
-  [ -d "$B2_DIR" ] && B2_CHOICE="$(pick_first_present "$B2_DIR" "${B2_CAND[@]}")" || B2_CHOICE=""
-
-  B3_DIR="bcm4364_drivers/wifi_firmware/C-4364__s-B3"
-  B3_CAND=("kure" "borneo" "hanauma")
-  [ -d "$B3_DIR" ] && B3_CHOICE="$(pick_first_present "$B3_DIR" "${B3_CAND[@]}")" || B3_CHOICE=""
-
-  install_variant() {
-    local variant="$1" base="$2" code="$3"
-    local src_fw="${base}/${code}.trx"
-    local src_clm="${base}/${code}.clmb"
-    local src_txc="${base}/${code}.txcb"
-
-    local t_apple_bin="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${code}.bin"
-    local t_apple_clm="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${code}.clm_blob"
-    local t_apple_txc="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${code}.txcap_blob"
-
-    install -m 0644 "$src_fw"  "$t_apple_bin"
-    install -m 0644 "$src_clm" "$t_apple_clm"
-    install -m 0644 "$src_txc" "$t_apple_txc"
-    COPIED+=("$t_apple_bin" "$t_apple_clm" "$t_apple_txc")
-
-    ln -sf "$(basename "$t_apple_bin")" "/lib/firmware/brcm/brcmfmac4364${variant}-pcie.bin"
-    ln -sf "$(basename "$t_apple_clm")" "/lib/firmware/brcm/brcmfmac4364${variant}-pcie.clm_blob"
-    ln -sf "$(basename "$t_apple_txc")" "/lib/firmware/brcm/brcmfmac4364${variant}-pcie.txcap_blob"
-  }
-
-  [ -n "$B2_CHOICE" ] && install_variant "b2" "$B2_DIR" "$B2_CHOICE"
-  [ -n "$B3_CHOICE" ] && install_variant "b3" "$B3_DIR" "$B3_CHOICE"
-
-  modprobe -r wl brcmfmac 2>/dev/null || true
-  modprobe brcmfmac || echo "WARN: brcmfmac konnte nicht geladen werden."
-
-  {
-    echo "## WLAN files:"
-    printf '%s\n' "${COPIED[@]}" | sort -u
-  } >>"$MANIFEST"
-
-  popd >/dev/null
-  rm -rf "$TMP_WIFI"
-fi
-
-# --- AUDIO (DKMS) ---
-if [ "$choice" = "2" ] || [ "$choice" = "3" ]; then
-  echo "==> Audio (CS8409) via DKMS bauen & installieren…"
-  rm -rf "$SRC_ROOT"
-  mkdir -p "$SRC_ROOT"
-  TMP_AUD="$(mktemp -d)"
-  pushd "$TMP_AUD" >/dev/null
-
-  curl -L -o cs8409.tar.gz "$REPO_CS8409_TAR"
-  tar -xzf cs8409.tar.gz
-  rsync -a --delete snd-hda-codec-cs8409-master/ "$SRC_ROOT/"
-
-  cat >"$SRC_ROOT/dkms.conf" <<'EOF'
-PACKAGE_NAME="snd-hda-codec-cs8409"
-PACKAGE_VERSION="1.0"
-BUILT_MODULE_NAME[0]="snd-hda-codec-cs8409"
-DEST_MODULE_LOCATION[0]="/kernel/sound/pci/hda"
-AUTOINSTALL="yes"
-MAKE[0]="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build modules"
-CLEAN="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build clean"
-EOF
-
-  dkms remove  -m "$DKMS_NAME" -v "$DKMS_VER" --all >/dev/null 2>&1 || true
-  dkms add     -m "$DKMS_NAME" -v "$DKMS_VER"
-  dkms build   -m "$DKMS_NAME" -v "$DKMS_VER"
-  dkms install -m "$DKMS_NAME" -v "$DKMS_VER"
-
-  echo "## DKMS: ${DKMS_NAME}-${DKMS_VER}" >>"$MANIFEST"
-
-  popd >/dev/null
-  rm -rf "$TMP_AUD"
-fi
-
-# --- PipeWire aktivieren ---
-echo "==> PipeWire aktivieren…"
-if [ -n "${SUDO_USER:-}" ] && id "$SUDO_USER" >/dev/null 2>&1; then
-  # 1) Versuch: in aktiver User-Session
-  if runuser -u "$SUDO_USER" -- systemctl --user enable --now pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null; then
-    :
-  else
-    # 2) Fallback: linger + machine-Verbindung
-    loginctl enable-linger "$SUDO_USER" || true
-    systemctl --user --machine="${SUDO_USER}@" enable --now pipewire.service pipewire-pulse.service wireplumber.service || true
-    echo "Hinweis: Falls oben Fehler zu DBUS/XDG_RUNTIME_DIR erschienen sind, führe nach der Installation einmal als normaler Nutzer aus:"
-    echo "  systemctl --user enable --now pipewire.service pipewire-pulse.service wireplumber.service"
+install_wifi() {
+  say "WLAN-Firmware kopieren…"
+  copy_fw_set "$FIRMWARE_SRC_B2" "BCM4364 B2"
+  copy_fw_set "$FIRMWARE_SRC_B3" "BCM4364 B3"
+  if command -v update-initramfs >/dev/null 2>&1; then
+    update-initramfs -u || true
   fi
-fi
+  ok "WLAN-Firmware installiert."
+}
 
-echo
-echo "✔ Installation abgeschlossen."
-echo "Manifest: $MANIFEST"
+install_audio() {
+  say "Audio (Cirrus CS8409) via DKMS bauen & installieren…"
+
+  # Minimal-Check der Quellen
+  for f in dkms.conf Makefile patch_cs8409.c patch_cirrus_apple.h; do
+    [[ -f "$AUDIO_SRC/$f" ]] || { err "Datei fehlt: $AUDIO_SRC/$f"; exit 2; }
+  done
+
+  # Sauberer Zustand
+  dkms remove -m "$DKMS_NAME" -v "$DKMS_VER" --all >/dev/null 2>&1 || true
+  rm -rf "$DKMS_DST"
+  install -d "$DKMS_DST"
+
+  # Quellen in /usr/src spiegeln
+  rsync -a --delete "$AUDIO_SRC"/ "$DKMS_DST"/
+
+  # DKMS-Lebenszyklus
+  dkms add    -m "$DKMS_NAME" -v "$DKMS_VER"
+  dkms build  -m "$DKMS_NAME" -v "$DKMS_VER"
+  dkms install -m "$DKMS_NAME" -v "$DKMS_VER" --force
+
+  # Modul laden (falls möglich)
+  modprobe "$DKMS_NAME" || true
+  ok "Audio-Treiber installiert."
+}
+
+pipewire_hint() {
+  if [[ -z "${SUDO_USER:-}" ]]; then
+    say "Hinweis: PipeWire läuft als USER-Dienst. In deiner Desktop-Session prüfen mit:"
+    echo "   systemctl --user --type=service | grep -E 'pipewire|wireplumber'"
+  fi
+}
+
+menu() {
+  echo
+  echo "Welche Komponenten sollen installiert werden?"
+  echo "  1) Nur WLAN"
+  echo "  2) Nur Audio"
+  echo "  3) WLAN + Audio (Standard)"
+  read -r -p "Auswahl [1-3]: " choice || true
+  case "${choice:-3}" in
+    1) SELECTION="wifi"  ;;
+    2) SELECTION="audio" ;;
+    3|*) SELECTION="both";;
+  esac
+  echo
+}
+
+manifest() {
+  local d="/var/lib/imac-linux-wifi-audio"
+  install -d "$d"
+  {
+    echo "timestamp: $(date -Is)"
+    echo "kernel: $(uname -r)"
+    echo "firmware_b2: $FIRMWARE_SRC_B2"
+    echo "firmware_b3: $FIRMWARE_SRC_B3"
+    echo "audio_src:   $AUDIO_SRC"
+    echo "dkms:        $DKMS_NAME/$DKMS_VER"
+  } > "$d/manifest.txt"
+  ok "Manifest: $d/manifest.txt"
+}
+
+main() {
+  needroot
+  menu
+  install_pkgs
+
+  case "$SELECTION" in
+    wifi) install_wifi ;;
+    audio) install_audio ;;
+    both) install_wifi; install_audio ;;
+  esac
+
+  pipewire_hint
+  ok "Installation abgeschlossen."
+  manifest
+}
+
+main "$@"
