@@ -21,15 +21,20 @@ if ! grep -qE '^(13|13\.)' /etc/debian_version 2>/dev/null; then
   echo "WARN: Nicht Debian 13 erkannt. Ungetestet, kann aber funktionieren." | tee -a "$MANIFEST"
 fi
 
+# --- Auswahl ---
 echo
 echo "Welche Komponenten sollen installiert werden?"
 echo "  1) Nur WLAN"
 echo "  2) Nur Audio"
 echo "  3) WLAN + Audio (Standard)"
-read -rp "Auswahl [1-3]: " choice
-choice="${choice:-3}"
+read -rp "Auswahl [1-3]: " choice_raw || choice_raw=""
+choice="$(echo "${choice_raw:-}" | tr -cd '0-9')"
+case "${choice:-}" in
+  1|2|3) : ;;                   # gültig
+  *) echo "Hinweis: ungültige Eingabe -> Standard = 3 (WLAN+Audio)"; choice=3 ;;
+esac
 
-# ---------------- Basis-Pakete -------------------------
+# --- Pakete ---
 echo "==> Pakete installieren…"
 apt-get update -y
 apt-get install -y \
@@ -39,9 +44,9 @@ apt-get install -y \
   pipewire pipewire-pulse wireplumber pavucontrol \
   alsa-utils alsa-ucm-conf
 
-# ---------------- WLAN -------------------------
+# --- WLAN ---
 if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
-  echo "==> WLAN-Firmware installieren…"
+  echo "==> WLAN-Firmware holen & installieren…"
   TMP_WIFI="$(mktemp -d)"
   pushd "$TMP_WIFI" >/dev/null
   curl -L -o bcm4364_firmware.zip "$REPO_WIFI_ZIP"
@@ -54,8 +59,7 @@ if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
     local base_dir="$1"; shift
     for c in "$@"; do
       if [ -f "${base_dir}/${c}.trx" ] && [ -f "${base_dir}/${c}.clmb" ] && [ -f "${base_dir}/${c}.txcb" ]; then
-        echo "$c"
-        return 0
+        echo "$c"; return 0
       fi
     done
     return 1
@@ -70,15 +74,14 @@ if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
   [ -d "$B3_DIR" ] && B3_CHOICE="$(pick_first_present "$B3_DIR" "${B3_CAND[@]}")" || B3_CHOICE=""
 
   install_variant() {
-    local variant="$1" base="$2" choice="$3"
-    local apple_codename="$choice"
-    local src_fw="${base}/${apple_codename}.trx"
-    local src_clm="${base}/${apple_codename}.clmb"
-    local src_txc="${base}/${apple_codename}.txcb"
+    local variant="$1" base="$2" code="$3"
+    local src_fw="${base}/${code}.trx"
+    local src_clm="${base}/${code}.clmb"
+    local src_txc="${base}/${code}.txcb"
 
-    local t_apple_bin="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${apple_codename}.bin"
-    local t_apple_clm="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${apple_codename}.clm_blob"
-    local t_apple_txc="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${apple_codename}.txcap_blob"
+    local t_apple_bin="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${code}.bin"
+    local t_apple_clm="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${code}.clm_blob"
+    local t_apple_txc="/lib/firmware/brcm/brcmfmac4364${variant}-pcie.apple,${code}.txcap_blob"
 
     install -m 0644 "$src_fw"  "$t_apple_bin"
     install -m 0644 "$src_clm" "$t_apple_clm"
@@ -105,9 +108,9 @@ if [ "$choice" = "1" ] || [ "$choice" = "3" ]; then
   rm -rf "$TMP_WIFI"
 fi
 
-# ---------------- AUDIO -------------------------
+# --- AUDIO (DKMS) ---
 if [ "$choice" = "2" ] || [ "$choice" = "3" ]; then
-  echo "==> Audio (CS8409) via DKMS installieren…"
+  echo "==> Audio (CS8409) via DKMS bauen & installieren…"
   rm -rf "$SRC_ROOT"
   mkdir -p "$SRC_ROOT"
   TMP_AUD="$(mktemp -d)"
@@ -127,9 +130,9 @@ MAKE[0]="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_V
 CLEAN="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build clean"
 EOF
 
-  dkms remove -m "$DKMS_NAME" -v "$DKMS_VER" --all >/dev/null 2>&1 || true
-  dkms add    -m "$DKMS_NAME" -v "$DKMS_VER"
-  dkms build  -m "$DKMS_NAME" -v "$DKMS_VER"
+  dkms remove  -m "$DKMS_NAME" -v "$DKMS_VER" --all >/dev/null 2>&1 || true
+  dkms add     -m "$DKMS_NAME" -v "$DKMS_VER"
+  dkms build   -m "$DKMS_NAME" -v "$DKMS_VER"
   dkms install -m "$DKMS_NAME" -v "$DKMS_VER"
 
   echo "## DKMS: ${DKMS_NAME}-${DKMS_VER}" >>"$MANIFEST"
@@ -138,10 +141,19 @@ EOF
   rm -rf "$TMP_AUD"
 fi
 
-# ---------------- PipeWire aktivieren -------------------------
+# --- PipeWire aktivieren ---
 echo "==> PipeWire aktivieren…"
 if [ -n "${SUDO_USER:-}" ] && id "$SUDO_USER" >/dev/null 2>&1; then
-  runuser -u "$SUDO_USER" -- systemctl --user enable --now pipewire.service pipewire-pulse.service wireplumber.service || true
+  # 1) Versuch: in aktiver User-Session
+  if runuser -u "$SUDO_USER" -- systemctl --user enable --now pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null; then
+    :
+  else
+    # 2) Fallback: linger + machine-Verbindung
+    loginctl enable-linger "$SUDO_USER" || true
+    systemctl --user --machine="${SUDO_USER}@" enable --now pipewire.service pipewire-pulse.service wireplumber.service || true
+    echo "Hinweis: Falls oben Fehler zu DBUS/XDG_RUNTIME_DIR erschienen sind, führe nach der Installation einmal als normaler Nutzer aus:"
+    echo "  systemctl --user enable --now pipewire.service pipewire-pulse.service wireplumber.service"
+  fi
 fi
 
 echo
