@@ -1,5 +1,5 @@
 # 🖥️ iMac Linux WiFi + Audio 
-Dieses Repository stellt ein **Installationsskript** bereit, mit dem auf **Intel iMacs (T2 Generation)** unter **Linux** 
+Dieses Repository stellt ein **Installationsskript** bereit, mit dem auf **iMacs (T2 Generation mit Intel Prozessor)** unter **Linux** 
 
 - **WLAN (Broadcom BCM4364)** (`brcmfmac4364b2/b3-pcie`) und
 - **Audio (Cirrus Logic CS8409)** (ALC layout, DKMS-Modul)
@@ -92,12 +92,12 @@ Das CS8409-Modul stammt aus dem GitHub-Release <a href="https://github.com/egore
   
 - **kein Audio**: Ausgabegerät in den Einstellungen > Audio festgelegt?
 
-📜 **Lizenz**
+📜 **Lizenz & Rechtliches**
 
-- **Skripte, DKMS Setup & Doku:** MIT License
-- **Audio-Treiber (CS8409):** GPLv2 (basierend auf [egorenar/snd-hda-codec-cs8409](https://github.com/egorenar/snd-hda-codec-cs8409))
-- **WLAN-Firmware:** proprietär (Broadcom/Apple), siehe [FIRMWARE-NOTICE](./FIRMWARE-NOTICE) (basierend auf [reynaldliu/macbook16-1-wifi-bcm4364-binary](https://github.com/reynaldliu/macbook16-1-wifi-bcm4364-binary)). Broadcom-Firmware ist proprietär und wird hier nur zu Testzwecken bereitgestellt.
+- **Skripte, DKMS Setup & Dokumentation:** © 2025 frogro, veröffentlicht unter derMIT License
+- **Audio-Treiber (CS8409):** GPLv2 (ursprüngliche Quelle: [egorenar/snd-hda-codec-cs8409](https://github.com/egorenar/snd-hda-codec-cs8409))
+- **WLAN-Firmware:** proprietär (Broadcom/Apple), siehe [FIRMWARE-NOTICE](./FIRMWARE-NOTICE). Bereitstellung in diesem Repository erfolgt **ausschließlich zu Test- und Kompatibilitätszwecken**.  Ursprüngliche Quelle: [reynaldliu/macbook16-1-wifi-bcm4364-binary](https://github.com/reynaldliu/macbook16-1-wifi-bcm4364-binary)). Falls rechtlich problematisch, bitte Firmware direkt aus der Originalquelle beziehen.
 
-🚀 **Credits**
+- 🚀 **Credits**
 
 BCM4364 Binary Firmware: reynaldliu, CS8409 Driver: egorenar
