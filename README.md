@@ -64,7 +64,7 @@ Falls Änderungen rückgängig gemacht werden sollen:
 Das Skript lädt die benötigte BCM4364-Firmware automatisch aus dem Release von reynaldliu/macbook16-1-wifi-bcm4364-binary. Beide Varianten (b2 und b3) werden installiert, der Kernel nutzt die richtige automatisch.
 
 **Audio:**
-Das CS8409-Modul wird via DKMS gebaut (Quellen von egorenar/snd-hda-codec-cs8409). Dadurch wird das Modul bei einem Kernel-Updates automatisch neu gebaut. Nutze ```bash sudo dkms status```, um die korrekte Einbindung des CS8409-Moduls zu prüfen. Das Skript aktiviert PipeWire (pipewire-pulse, wireplumber) und installiert pavucontrol.
+Das CS8409-Modul wird via DKMS gebaut (Quellen von egorenar/snd-hda-codec-cs8409). Dadurch wird das Modul bei einem Kernel-Updates automatisch neu gebaut. Nutze ```bash sudo dkms status```, um die korrekte Einbindung des CS8409-Moduls zu prüfen. Das Skript aktiviert PipeWire (pipewire-pulse, wireplumber), installiert pavucontrol und weitere Abhängigkeiten (build-essential, dkms, pipewire).
 
 📜 **Rechtliches / Lizenz** 
 
@@ -72,3 +72,8 @@ Das CS8409-Modul wird via DKMS gebaut (Quellen von egorenar/snd-hda-codec-cs8409
 - **CS8409-Quellen** stammen von **egorenar/snd-hda-codec-cs8409** und werden beim Installieren geladen.
 - Dieses Repo (Skripte/Packaging) steht unter **MIT-Lizenz** (siehe LICENSE).
 - Nutzung auf eigene Verantwortung; keine Garantie.
+
+🚀 **Credits**
+
+BCM4364 Binary Firmware: reynaldliu
+CS8409 Driver: egorenar
