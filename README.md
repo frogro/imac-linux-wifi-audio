@@ -1,12 +1,12 @@
 # 🖥️ iMac Linux WiFi + Audio 
-Dieses Repository stellt ein **Installationsskript** bereit, mit dem auf **Intel iMacs** unter **Linux** 
+Dieses Repository stellt ein **Installationsskript** bereit, mit dem auf **Intel iMacs (T2 Generation)** unter **Linux** 
 
-- **WLAN (Broadcom BCM4364)** (b2/b3 Varianten) und
-- **Audio (Cirrus Logic CS8409)**
+- **WLAN (Broadcom BCM4364)** (`brcmfmac4364b2/b3-pcie`) und
+- **Audio (Cirrus Logic CS8409)** (ALC layout, DKMS-Modul)
 
 eingerichtet werden kann. 
 
-⚠️ Getestet ausschließlich mit **Debian 13 (trixie)**. Andere Distros/Versionen können funktionieren, sind aber nicht Teil dieses How-Tos.
+⚠️ Getestet ausschließlich mit **Debian 13 (trixie)**. Andere Linux-Distros/Versionen können funktionieren, sind aber nicht Teil dieses How-Tos.
 
 ✅ **Unterstützte Geräte**
 
@@ -45,17 +45,27 @@ eingerichtet werden kann.
 ```bash
      sudo ./install.sh
 ```
+Sodann kannst du auswählen, WLAN und Audio, nur WLAN oder nur Audio zu installieren.
 
-4. **Neustarten** – danach sollte WLAN + Audio funktionieren. Ggf. noch das interne HDA-Device in den Einstellungen unter Audio auswählen.
+Das Skript:
+
+- installiert benötigte Pakete (curl, dkms, headers, pipewire, …),
+- kopiert die passenden WLAN-Firmware-Einträge nach /lib/firmware/brcm/,
+- baut & installiert das Audio-DKMS-Modul,
+- schreibt ein Manifest nach /var/lib/imac-linux-wifi-audio/manifest.txt.
+
+4. Reboot
 
 🔧 **Deinstallation**
 
 Falls Änderungen rückgängig gemacht werden sollen:
 
 ```bash
-     wget https://raw.githubusercontent.com/frogro/imac-linux-wifi-audio/main/uninstall.sh
-     chmod +x uninstall.sh
-     sudo ./uninstall.sh
+  sudo ./uninstall.sh           # entfernt WLAN + Audio
+sudo ./uninstall.sh --wifi    # nur WLAN-Dateien
+sudo ./uninstall.sh --audio   # nur DKMS-Audio   wget https://raw.githubusercontent.com/frogro/imac-linux-wifi-audio/main/uninstall.sh
+
+
 ```
 
 ℹ️ **Hinweise**
