@@ -1,0 +1,14 @@
+Broadcom / Apple WiFi Firmware Notice
+-------------------------------------
+
+This repository redistributes binary firmware files for Broadcom BCM4364
+chipsets (variants b2 and b3), originally extracted from macOS / Apple hardware.
+
+- Copyright (C) Broadcom / Apple Inc.
+- No license under MIT or GPL applies to these files.
+- They are provided *as-is* for personal use only, in order to enable WiFi
+  support on Apple iMac hardware under Linux.
+- Redistribution may be restricted by Apple/Broadcom licensing terms.
+
+If you are an owner of the copyright and object to this redistribution,
+please contact the repository maintainer to have the files removed.
