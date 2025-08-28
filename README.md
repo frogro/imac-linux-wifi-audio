@@ -92,9 +92,11 @@ Das CS8409-Modul stammt aus dem GitHub-Release <a href="https://github.com/egore
   
 - **kein Audio**: Ausgabegerät in den Einstellungen > Audio festgelegt?
 
-📜 **Rechtliches / Lizenz** 
-- Dieses Repo (Skripte/Packaging) steht unter **MIT-Lizenz** (siehe LICENSE).
-- Nutzung auf eigene Verantwortung; keine Haftung, keine Garantie.
+📜 **Lizenz**
+
+- **Skripte & Doku:** MIT License
+- **Audio-Treiber (CS8409):** GPLv2 (basierend auf [egorenar/snd-hda-codec-cs8409](https://github.com/egorenar/snd-hda-codec-cs8409))
+- **WLAN-Firmware:** proprietär (Broadcom/Apple), siehe [FIRMWARE-NOTICE](./FIRMWARE-NOTICE) (basierend auf [reynaldliu/macbook16-1-wifi-bcm4364-binary](https://github.com/reynaldliu/macbook16-1-wifi-bcm4364-binary))
 
 🚀 **Credits**
 
