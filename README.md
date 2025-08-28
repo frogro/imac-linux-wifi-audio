@@ -36,17 +36,17 @@ eingerichtet werden kann.
      wget https://raw.githubusercontent.com/frogro/imac-linux-wifi-audio/main/install.sh
 ```
 
-3. Mach es ausführbar:
+2. Mach es ausführbar:
 ```bash
      chmod +x install.sh
 ```
 
-5. Führe es mit Root-Rechten aus:
+3. Führe es mit Root-Rechten aus:
 ```bash
      sudo ./install.sh
 ```
 
-7. **Neustarten** – danach sollte WLAN + Audio funktionieren. Ggf. noch das interne HDA-Device in den Einstellungen unter Audio auswählen.
+4. **Neustarten** – danach sollte WLAN + Audio funktionieren. Ggf. noch das interne HDA-Device in den Einstellungen unter Audio auswählen.
 
 🔧 **Deinstallation**
 
