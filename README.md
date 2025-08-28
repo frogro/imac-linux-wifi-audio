@@ -58,10 +58,11 @@ Das Skript:
 
 🔧 **Deinstallation**
 
-Lade das Deinstallationsskript herunter:
+Lade das Deinstallationsskript herunter und mach es ausführbar:
 
 ```bash
      wget https://raw.githubusercontent.com/frogro/imac-linux-wifi-audio/main/uninstall.sh
+     chmod +x uninstall.sh
 ```
 
 Du kannst wählen, welche Komponenten entfernt werden sollen:
