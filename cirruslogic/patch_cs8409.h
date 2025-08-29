@@ -14,11 +14,9 @@
 #include <linux/workqueue.h>
 #include <sound/cs42l42.h>
 #include <sound/hda_codec.h>
-/* #include "hda_local.h" 
+
 #include "cs8409_compat.h"
-#include "hda_auto_parser.h"
-#include "hda_jack.h"
-#include "hda_generic.h"
+
 
 //#ifdef APPLE_CODECS
 //#include <linux/ctype.h>
