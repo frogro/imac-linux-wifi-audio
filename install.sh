@@ -185,6 +185,71 @@ if $DO_AUDIO; then
 
   [[ -f "${DKMS_SRC}/patch_cs8409.c" ]] || die "patch_cs8409.c fehlt unter ${DKMS_SRC}"
 
+  # (A) Kompatibilitäts-Header bereitstellen
+  say "cs8409_compat.h hinzufügen…"
+  cat > "${DKMS_SRC}/cs8409_compat.h" <<'EOF'
+#ifndef _CS8409_COMPAT_H
+#define _CS8409_COMPAT_H
+
+/* hda_local.h */
+#if __has_include(<sound/pci/hda/hda_local.h>)
+#  include <sound/pci/hda/hda_local.h>
+#elif __has_include("hda_local.h")
+#  include "hda_local.h"
+#else
+#  error "hda_local.h nicht gefunden – bitte Kernel-Header installieren"
+#endif
+
+/* hda_codec.h */
+#if __has_include(<sound/pci/hda/hda_codec.h>)
+#  include <sound/pci/hda/hda_codec.h>
+#elif __has_include("hda_codec.h")
+#  include "hda_codec.h"
+#endif
+
+/* hda_jack.h */
+#if __has_include(<sound/pci/hda/hda_jack.h>)
+#  include <sound/pci/hda/hda_jack.h>
+#elif __has_include("hda_jack.h")
+#  include "hda_jack.h"
+#endif
+
+/* hda_auto_parser.h */
+#if __has_include(<sound/pci/hda/hda_auto_parser.h>)
+#  include <sound/pci/hda/hda_auto_parser.h>
+#elif __has_include("hda_auto_parser.h")
+#  include "hda_auto_parser.h"
+#endif
+
+/* hda_bind.h */
+#if __has_include(<sound/pci/hda/hda_bind.h>)
+#  include <sound/pci/hda/hda_bind.h>
+#elif __has_include("hda_bind.h")
+#  include "hda_bind.h"
+#endif
+
+/* hda_generic.h */
+#if __has_include(<sound/pci/hda/hda_generic.h>)
+#  include <sound/pci/hda/hda_generic.h>
+#elif __has_include("hda_generic.h")
+#  include "hda_generic.h"
+#endif
+
+#endif /* _CS8409_COMPAT_H */
+EOF
+
+  # (B) patch_cs8409.c automatisch auf cs8409_compat.h umstellen (idempotent)
+  say "Includes in patch_cs8409.c auf cs8409_compat.h umstellen…"
+  # Erst alle direkten HDA-Includes entfernen/ersetzen …
+  sed -i -E \
+    -e 's|#include[[:space:]]*"hda_[a-z_]+\.h"[[:space:]]*$||g' \
+    -e 's|#include[[:space:]]*<sound/pci/hda/hda_[a-z_]+\.h>[[:space:]]*$||g' \
+    "${DKMS_SRC}/patch_cs8409.c"
+  # … und sicherstellen, dass genau 1 Include für den Kompat-Header vorhanden ist.
+  if ! grep -q '^#include[[:space:]]*"cs8409_compat.h"' "${DKMS_SRC}/patch_cs8409.c"; then
+    sed -i '1i #include "cs8409_compat.h"' "${DKMS_SRC}/patch_cs8409.c"
+  fi
+
   # dkms.conf schreiben
   say "dkms.conf schreiben…"
   cat > "${DKMS_SRC}/dkms.conf" <<'DKMSCONF'
