@@ -1,93 +1,259 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-TITLE="iMac Late 2019 - Debian 13 Install Script"
-PKG="snd-hda-codec-cs8409"
-VER="1.0-6.12"                      # eigene DKMS-Version, kollidiert nicht mit '1.0'
-SRC="/usr/src/${PKG}-${VER}"
-KVER="$(uname -r)"
-KDIR="/lib/modules/${KVER}/build"
+# ============================================
+#  iMac Late 2019 – WLAN (b2/b3) + Audio CS8409
+# ============================================
 
-FROGRO_REPO="https://github.com/frogro/imac-linux-wifi-audio"
-FROGRO_SUBDIR="cirruslogic"         # dort liegen die *.h
-FROGRO_RAW="https://raw.githubusercontent.com/frogro/imac-linux-wifi-audio/main/${FROGRO_SUBDIR}"
+# ----- Helpers -----
+need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { echo "Bitte mit sudo/root starten."; exit 1; }; }
+say()  { echo -e "\033[1;32m==>\033[0m $*"; }
+warn() { echo -e "\033[1;33m[!]\033[0m $*"; }
+die()  { echo -e "\033[1;31m[×]\033[0m $*"; exit 1; }
 
-DAVIDJO_RAW="https://raw.githubusercontent.com/davidjo/snd_hda_macbookpro/master/patch_cirrus"
-PATCH_C="patch_cs8409.c"            # aus davidjo
+need_root
 
-say() { echo -e "$*"; }
-hr() { printf '%*s\n' "${COLUMNS:-60}" '' | tr ' ' '-'; }
+# ----- Repos & Pfade -----
+REPO_URL="https://github.com/frogro/imac-linux-wifi-audio.git"
+REPO_DIR="/tmp/imac-linux-wifi-audio"
 
-menu() {
-  hr
-  echo " $TITLE"
-  hr
-  echo
-  echo "Bitte auswählen:"
-  echo "  1) WLAN + Audio"
-  echo "  2) nur WLAN"
-  echo "  3) nur Audio"
-  echo
-  read -rp "Deine Auswahl [1-3]: " CHOICE
-  echo
+FW_DEST="/lib/firmware/brcm"
+
+# DKMS (neues Schema)
+DKMS_NAME="snd-hda-codec-cs8409"
+DKMS_VER="1.0-6.12"                         # DKMS-Versionslabel
+DKMS_SRC="/usr/src/${DKMS_NAME}-${DKMS_VER}"
+
+# Audio-Quellen
+FROGRO_SUBDIR="cirruslogic"                 # erwartet deine *.c/*.h
+DAVIDJO_REPO="https://github.com/davidjo/snd_hda_macbookpro.git"
+DAVIDJO_SUBDIR="patch_cirrus"               # Fallback
+
+# ----- Fehler- / Exit-Handling -----
+WORK=""
+cleanup() {
+  [[ -n "${WORK}" && -d "${WORK}" ]] && rm -rf "${WORK}" || true
 }
+trap cleanup EXIT
 
-ensure_deps() {
-  say "[*] Abhängigkeiten installieren..."
-  sudo apt-get update
-  sudo apt-get install -y build-essential dkms rsync git curl wget ca-certificates "linux-headers-$(uname -r)"
+on_error() {
+  echo
+  echo "!!! Fehler während der Installation."
+  # Falls Audio gebaut wurde: DKMS-Log anhängen
+  local log="/var/lib/dkms/${DKMS_NAME}/${DKMS_VER}/build/make.log"
+  if [[ -f "$log" ]]; then
+    echo "--- DKMS Build-Log (Tail) ---"
+    tail -n 120 "$log" || true
+  fi
 }
+trap on_error ERR
 
-dkms_clean_all() {
-  say "[*] Vorhandene cs8409-DKMS-Einträge bereinigen..."
-  for V in "1.0-6.12" "1.0"; do
-    sudo dkms remove -m "$PKG" -v "$V" --all 2>/dev/null || true
-    sudo dkms delete -m "$PKG" -v "$V" --all 2>/dev/null || true
-    sudo rm -rf "/usr/src/${PKG}-${V}"
+# =========================
+#  Auswahlmenü
+# =========================
+echo "Welche Komponenten sollen installiert werden?"
+echo "  1) Nur WLAN"
+echo "  2) Nur Audio"
+echo "  3) WLAN + Audio (Standard)"
+read -r -p "Auswahl [1-3]: " CHOICE
+CHOICE="${CHOICE:-3}"
+
+DO_WIFI=false; DO_AUDIO=false
+case "$CHOICE" in
+  1) DO_WIFI=true ;;
+  2) DO_AUDIO=true ;;
+  3) DO_WIFI=true; DO_AUDIO=true ;;
+  *) warn "Ungültige Eingabe – nehme Standard (3)."; DO_WIFI=true; DO_AUDIO=true ;;
+esac
+
+# =========================
+#  Pakete
+# =========================
+say "Pakete installieren…"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y \
+  git curl wget unzip ca-certificates \
+  build-essential dkms make rsync \
+  linux-headers-"$(uname -r)" \
+  pipewire pipewire-pulse wireplumber \
+  pavucontrol alsa-utils alsa-ucm-conf \
+  grep coreutils sed gawk
+
+# =========================
+#  Repo holen (shallow clone)
+# =========================
+say "Repository von GitHub holen…"
+rm -rf "$REPO_DIR"
+git clone --depth=1 "$REPO_URL" "$REPO_DIR"
+
+# =========================
+#  WLAN installieren
+# =========================
+if $DO_WIFI; then
+  say "WLAN-Firmware (b2 & b3) kopieren…"
+  mkdir -p "$FW_DEST"
+
+  B2_SRC="$REPO_DIR/broadcom/b2"
+  B3_SRC="$REPO_DIR/broadcom/b3"
+
+  found_any=false
+
+  if [ -d "$B2_SRC" ]; then
+    for f in \
+      brcmfmac4364b2-pcie.bin \
+      brcmfmac4364b2-pcie.clm_blob \
+      brcmfmac4364b2-pcie.txcap_blob \
+      brcmfmac4364b2-pcie.apple,midway.bin \
+      brcmfmac4364b2-pcie.apple,midway.clm_blob \
+      brcmfmac4364b2-pcie.apple,midway.txcap_blob
+    do
+      [ -f "$B2_SRC/$f" ] && install -m 0644 "$B2_SRC/$f" "$FW_DEST/" && found_any=true
+    done
+  fi
+
+  if [ -d "$B3_SRC" ]; then
+    for f in \
+      brcmfmac4364b3-pcie.bin \
+      brcmfmac4364b3-pcie.clm_blob \
+      brcmfmac4364b3-pcie.txcap_blob \
+      brcmfmac4364b3-pcie.apple,borneo.bin \
+      brcmfmac4364b3-pcie.apple,borneo.clm_blob \
+      brcmfmac4364b3-pcie.apple,borneo.txcap_blob
+    do
+      [ -f "$B3_SRC/$f" ] && install -m 0644 "$B3_SRC/$f" "$FW_DEST/" && found_any=true
+    done
+  fi
+
+  $found_any || die "Keine Broadcom-Firmwaredateien im Repo gefunden."
+
+  # Hinweise, aber nicht fatal
+  for must in \
+      brcmfmac4364b2-pcie.bin brcmfmac4364b2-pcie.clm_blob brcmfmac4364b2-pcie.txcap_blob \
+      brcmfmac4364b3-pcie.bin brcmfmac4364b3-pcie.clm_blob brcmfmac4364b3-pcie.txcap_blob
+  do
+    [ -f "$FW_DEST/$must" ] || warn "Hinweis: $must fehlt in $FW_DEST (ok, wenn dein Gerät die andere Revision nutzt)."
   done
-  sudo modprobe -r "$PKG" 2>/dev/null || true
-}
 
-prepare_audio_sources() {
-  local workdir="$1"
-  say "[*] Audio-Quellen vorbereiten unter: $workdir"
-  mkdir -p "$workdir/src"
-  cd "$workdir/src"
+  say "WLAN-Firmware installiert nach $FW_DEST."
+fi
 
-  say "    - Lade Header (*.h) aus deinem Fork (frogro)..."
-  # Liste der benötigten Header aus deinem cirruslogic-Verzeichnis
-  # (ggf. erweitern, falls du weitere ergänzt)
-  headers=(
-    "patch_cirrus_apple.h"
-    "patch_cirrus_boot84.h"
-    "patch_cirrus_new84.h"
-    "patch_cirrus_real84.h"
-    "patch_cirrus_real84_i2c.h"
-    "patch_cirrus.h"
-  )
-  for h in "${headers[@]}"; do
-    curl -fsSLo "$h" "${FROGRO_RAW}/${h}"
-  done
+# =========================
+#  Audio (CS8409) via DKMS
+# =========================
+if $DO_AUDIO; then
+  say "CS8409 (Cirrus) DKMS vorbereiten…"
 
-  say "    - Lade ${PATCH_C} aus davidjo (angepasstes .c für 6.x)..."
-  curl -fsSLo "${PATCH_C}" "${DAVIDJO_RAW}/${PATCH_C}"
+  # Altversionen aufräumen (falls du vorher 1.0 genutzt hast)
+  if dkms status | grep -q "^${DKMS_NAME}/1.0"; then
+    say "Alte DKMS-Version ${DKMS_NAME}/1.0 entfernen…"
+    dkms remove -m "${DKMS_NAME}" -v "1.0" --all || true
+  fi
 
-  # Minimaler Sanity-Check
-  [[ -s "${PATCH_C}" ]] || { echo "!!! ${PATCH_C} fehlt oder ist leer"; exit 1; }
-}
+  # Unsere Version säubern
+  if dkms status | grep -q "^${DKMS_NAME}/${DKMS_VER}"; then
+    say "Vorhandene DKMS-Version ${DKMS_NAME}/${DKMS_VER} entfernen…"
+    dkms remove -m "${DKMS_NAME}" -v "${DKMS_VER}" --all || true
+  fi
+  rm -rf "$DKMS_SRC"
+  install -d "$DKMS_SRC"
 
-write_dkms_files() {
-  local dst="$1"
-  say "[*] Erzeuge DKMS-Struktur unter: $dst"
-  sudo mkdir -p "$dst"
-  sudo rsync -a . "$dst/"
+  # Arbeitsverzeichnis
+  WORK="$(mktemp -d -p /tmp cs8409.XXXXXX)"
+  say "Arbeitsverzeichnis: ${WORK}"
 
-  say "[*] dkms.conf schreiben..."
-  sudo tee "${dst}/dkms.conf" >/dev/null <<DKMSCONF
-PACKAGE_NAME="${PKG}"
-PACKAGE_VERSION="${VER}"
+  # Quellen aus frogro bevorzugen
+  SRC_DIR="${REPO_DIR}/${FROGRO_SUBDIR}"
+  if [[ -f "${SRC_DIR}/patch_cs8409.c" ]]; then
+    say "Verwende Quellen aus frogro/${FROGRO_SUBDIR}"
+  else
+    warn "In ${FROGRO_SUBDIR}/ fehlt patch_cs8409.c – weiche auf davidjo aus…"
+    git clone --depth=1 "${DAVIDJO_REPO}" "${WORK}/davidjo"
+    if [[ -f "${WORK}/davidjo/${DAVIDJO_SUBDIR}/patch_cs8409.c" ]]; then
+      SRC_DIR="${WORK}/davidjo/${DAVIDJO_SUBDIR}"
+      say "Verwende Fallback-Quellen aus davidjo/${DAVIDJO_SUBDIR}"
+    else
+      die "Weder in frogro/${FROGRO_SUBDIR} noch in davidjo/${DAVIDJO_SUBDIR} gibt es patch_cs8409.c"
+    fi
+  fi
 
-BUILT_MODULE_NAME[0]="${PKG}"
+  # Relevante Dateien kopieren
+  rsync -a \
+    --include='*.c' --include='*.h' \
+    --exclude='*' \
+    "${SRC_DIR}/" "${DKMS_SRC}/"
+
+  [[ -f "${DKMS_SRC}/patch_cs8409.c" ]] || die "patch_cs8409.c fehlt unter ${DKMS_SRC}"
+
+  # dkms.conf schreiben
+  say "dkms.conf schreiben…"
+  cat > "${DKMS_SRC}/dkms.conf" <<'DKMSCONF'
+PACKAGE_NAME="snd-hda-codec-cs8409"
+PACKAGE_VERSION="1.0-6.12"
+
+BUILT_MODULE_NAME[0]="snd-hda-codec-cs8409"
 DEST_MODULE_LOCATION[0]="/kernel/sound/pci/hda"
 
-MAKE[0]="make KDIR=/lib/modules/\${kernelver}/b
+# DKMS übergibt ${kernelver}; an Kbuild weiterreichen
+MAKE[0]="make KDIR=/lib/modules/${kernelver}/build"
+CLEAN="make clean"
+
+AUTOINSTALL="yes"
+DKMSCONF
+
+  # Kbuild-Wrapper-Makefile schreiben
+  say "Kbuild-Wrapper-Makefile schreiben…"
+  cat > "${DKMS_SRC}/Makefile" <<'KBUILD'
+# Kbuild-Wrapper für DKMS
+KDIR ?= /lib/modules/$(shell uname -r)/build
+
+obj-m := snd-hda-codec-cs8409.o
+# Nur diese .c erzeugt das Modul; weitere .h werden via #include verwendet
+snd-hda-codec-cs8409-objs := patch_cs8409.o
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
+KBUILD
+
+  # DKMS add/build/install
+  say "DKMS add/build/install…"
+  dkms add -m "${DKMS_NAME}" -v "${DKMS_VER}"
+  dkms build -m "${DKMS_NAME}" -v "${DKMS_VER}"
+  dkms install -m "${DKMS_NAME}" -v "${DKMS_VER}"
+
+  # Audio-Userdienste (best effort)
+  say "Audio-Dienste aktivieren (falls möglich)…"
+  SUDO_USER_NAME="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
+  if id "$SUDO_USER_NAME" &>/dev/null; then
+    loginctl enable-linger "$SUDO_USER_NAME" || true
+    su -s /bin/sh -c "XDG_RUNTIME_DIR=/run/user/$(id -u "$SUDO_USER_NAME") systemctl --user daemon-reload" "$SUDO_USER_NAME" || true
+    su -s /bin/sh -c "XDG_RUNTIME_DIR=/run/user/$(id -u "$SUDO_USER_NAME") systemctl --user enable --now pipewire pipewire-pulse wireplumber" "$SUDO_USER_NAME" || true
+  else
+    warn "Konnte User-Services nicht aktivieren (Live-Umgebung?). Audio funktioniert nach Reboot dennoch."
+  fi
+
+  # Modul laden
+  say "Kernel-Module neu einlesen & laden…"
+  depmod -a || true
+  if modprobe snd-hda-codec-cs8409 2>/dev/null; then
+    say "CS8409-Modul geladen."
+  else
+    warn "Modul konnte nicht sofort geladen werden. Prüfe dmesg:"
+    echo "    dmesg | grep -i cs8409 | tail -n 120"
+  fi
+
+  say "CS8409 DKMS installiert."
+fi
+
+# =========================
+#  Abschluss
+# =========================
+say "✔ Installation abgeschlossen."
+echo "  • WLAN-Firmware liegt in: $FW_DEST"
+$DO_AUDIO && echo "  • DKMS: $(dkms status | grep -E "^${DKMS_NAME}/${DKMS_VER}" || echo 'nicht gefunden')"
+echo
+echo "Empfehlung: System neu starten."
+echo "Falls Audio stumm: 'pavucontrol' öffnen und Profil/Ausgabe prüfen."
