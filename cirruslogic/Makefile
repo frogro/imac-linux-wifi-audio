@@ -1,6 +1,10 @@
-KDIR ?= /lib/modules/$(shell uname -r)/build
+# Build nur für den Unterordner cirruslogic (wird via dkms.conf mit -C aufgerufen)
 
-# Zusätzliche Include-Pfade helfen Tooling & edge-cases
+# DKMS übergibt KVER=${kernelver}; sonst fallback auf laufenden Kernel
+KVER ?= $(shell uname -r)
+KDIR ?= /lib/modules/$(KVER)/build
+
+# HDA/ALSA-Header verfügbar machen
 EXTRA_CFLAGS += -I$(KDIR)/sound/pci/hda -I$(KDIR)/include -I$(KDIR)/include/uapi
 
 obj-m := snd-hda-codec-cs8409.o
