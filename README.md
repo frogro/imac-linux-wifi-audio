@@ -38,7 +38,7 @@ eingerichtet werden kann.
 
 2. Mach es ausführbar:
 ```bash
-     chmod +x install.sh
+     sudo chmod +x install.sh
 ```
 
 3. Führe es mit Root-Rechten aus:
