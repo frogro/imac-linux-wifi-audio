@@ -1,19 +1,13 @@
-# Modulname
-obj-m += snd-hda-codec-cs8409.o
-snd-hda-codec-cs8409-y := patch_cs8409.o
-
-# Kernel-Buildverzeichnis (von DKMS via KVER reingereicht, sonst uname -r)
-KVER ?= $(shell uname -r)
-KDIR ?= /lib/modules/$(KVER)/build
-PWD  := $(shell pwd)
-
-# Includepfade:
-# - eigenes Verzeichnis (für die patch_cirrus_*.h)
-# - Header aus dem HDA-Bereich der Kernel-Sourcen
-ccflags-y += -I$(PWD) -I$(KDIR)/sound/pci/hda
-
-all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
-
-clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+/* portable, doppelt-sicher */
+#if defined(__has_include)
+  #if __has_include(<sound/pci/hda/hda_local.h>)
+    #include <sound/pci/hda/hda_local.h>
+  #elif __has_include("hda_local.h")
+    #include "hda_local.h"
+  #else
+    #error "hda_local.h nicht gefunden – Kernel-Header (sound/pci/hda) fehlen?"
+  #endif
+#else
+  /* sehr alte Compiler: best-effort */
+  #include <sound/pci/hda/hda_local.h>
+#endif
