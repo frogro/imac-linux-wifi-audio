@@ -1,13 +1,13 @@
-/* portable, doppelt-sicher */
-#if defined(__has_include)
-  #if __has_include(<sound/pci/hda/hda_local.h>)
-    #include <sound/pci/hda/hda_local.h>
-  #elif __has_include("hda_local.h")
-    #include "hda_local.h"
-  #else
-    #error "hda_local.h nicht gefunden – Kernel-Header (sound/pci/hda) fehlen?"
-  #endif
-#else
-  /* sehr alte Compiler: best-effort */
-  #include <sound/pci/hda/hda_local.h>
-#endif
+KDIR ?= /lib/modules/$(shell uname -r)/build
+
+# Zusätzliche Include-Pfade helfen Tooling & edge-cases
+EXTRA_CFLAGS += -I$(KDIR)/sound/pci/hda -I$(KDIR)/include -I$(KDIR)/include/uapi
+
+obj-m := snd-hda-codec-cs8409.o
+snd-hda-codec-cs8409-objs := patch_cs8409.o
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
