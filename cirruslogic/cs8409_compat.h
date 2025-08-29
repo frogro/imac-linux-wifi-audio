@@ -10,7 +10,7 @@
 #  define __has_include(x) 0
 #endif
 
-/* Gemeinsame ALSA/Kern-Header – harmlos, falls ungenutzt */
+/* --- generische Kernel/ALSA-Basisheader (unschädlich, falls ungenutzt) --- */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -22,18 +22,27 @@
 #include <sound/asound.h>
 #include <sound/asoundef.h>
 
-/* Preferred: neue Kernelpfade */
+/*
+ * Preferred (neuere Kernel in Debian/Ubuntu/Fedora/Arch):
+ * - hda_local.h & Co. liegen unter sound/pci/hda/
+ * - die API-Header (hda_codec.h, hda_register.h, hda_verbs.h) liegen unter include/sound/
+ */
 #if __has_include(<sound/pci/hda/hda_local.h>)
+  /* Top-Level ALSA/HDA API */
   #include <sound/hda_codec.h>
   #include <sound/hda_register.h>
   #include <sound/hda_verbs.h>
+  /* Treiber-interne HDA-Header aus dem HDA-Teilbaum */
   #include <sound/pci/hda/hda_local.h>
   #include <sound/pci/hda/hda_generic.h>
   #include <sound/pci/hda/hda_auto_parser.h>
   #include <sound/pci/hda/hda_jack.h>
   #include <sound/pci/hda/hda_bind.h>
 
-/* Ältere Layouts */
+/*
+ * Älteres Layout:
+ * - alles direkt unter include/sound/ verfügbar
+ */
 #elif __has_include(<sound/hda_local.h>)
   #include <sound/hda_codec.h>
   #include <sound/hda_register.h>
@@ -44,7 +53,10 @@
   #include <sound/hda_jack.h>
   #include <sound/hda_bind.h>
 
-/* In-tree Fallback */
+/*
+ * In-tree-Fallback (falls als Teil des Kernelbaums kompiliert und die Dateien
+ * relativ im gleichen Verzeichnis liegen)
+ */
 #elif __has_include("hda_local.h")
   #include "hda_codec.h"
   #include "hda_register.h"
@@ -56,10 +68,10 @@
   #include "hda_bind.h"
 
 #else
-  #error "Kein passender Pfad für HDA-Header gefunden (hda_local.h). Kernel-Header installieren."
+  #error "Kein passender Pfad für HDA-Header gefunden (hda_local.h). Bitte Kernel-Header installieren."
 #endif
 
-/* Sanfte Kompat-Makros (schaden nicht, falls bereits definiert) */
+/* --- sanfte Kompat-Defines (tun nichts, wenn Kernel sie schon mitbringt) --- */
 #ifndef HDA_FIXUP_ACT_PRE_PROBE
 #define HDA_FIXUP_ACT_PRE_PROBE 0
 #endif
