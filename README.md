@@ -92,14 +92,14 @@ Das Skript:
 
 📜 Rechtliches & Lizenz
 
-* **Broadcom WLAN Firmware (b2/b3):** proprietär, Copyright © Broadcom**  
+**Broadcom WLAN Firmware (b2/b3):** proprietär, Copyright © Broadcom**  
 - Bereitstellung in diesem Repository erfolgt **ausschließlich zu Test- und Kompatibilitätszwecken**.
 - Ursprüngliche Quelle: reynaldliu/macbook16-1-wifi-bcm4364-binary.
 - Falls rechtlich problematisch, bitte Firmware direkt aus der Originalquelle beziehen.
 - siehe auch: FIRMWARE-NOTICE
 
-* **Cirrus Logic Treiber: GPLv2 (wird aus Linux-Kernel extrahiert)** 
+**Cirrus Logic Treiber:**  GPLv2 (wird aus Linux-Kernel extrahiert)
 
-* **Skripte & Dokumentation**: © 2025 frogro, veröffentlicht unter der MIT License, siehe auch LICENSE.
+**Skripte & Dokumentation**: © 2025 frogro, veröffentlicht unter der MIT License, siehe auch LICENSE.
 
 ⚠️ Getestet ausschließlich mit Debian 13 (trixie). Andere Linux-Distros/Versionen können funktionieren, jedoch ohne Garantie.
