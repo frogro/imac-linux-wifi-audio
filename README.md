@@ -1,12 +1,10 @@
 # 🖥️ iMac Linux WiFi + Audio 
-Dieses Repository stellt ein **Installationsskript** bereit, mit dem auf **iMacs (T2 Generation mit Intel Prozessor)** unter **Linux** 
+Viele **iMacs sowie MacBooks (2013–2019 / T2 Generation mit Intel Prozessor)** laufen super flott mit Linux, aber Sound und WLAN funktionieren nach der Installation nicht sofort. Hier findest du eine **Schritt-für-Schritt-Anleitung**, wie du beides aktivierst. 
 
-- **WLAN (Broadcom BCM4364)** (`brcmfmac4364b2/b3-pcie`) und
-- **Audio (Cirrus Logic CS8409)** (ALC layout, DKMS-Modul)
+In diesem **HowTo** geht es ausschließlich um Geräte mit
 
-eingerichtet werden kann. 
-
-⚠️ Getestet ausschließlich mit **Debian 13 (trixie)**. Andere Linux-Distros/Versionen können funktionieren, sind aber nicht Teil dieses How-Tos.
+- **Broadcom BCM4364 WLAN-Chipsatz** (brcmfmac4364b2/b3-pcie) und
+- **Cirrus Logic CS8409 Audiodevice** (ALC layout, DKMS-Modul)
 
 ✅ **Unterstützte Geräte**
 
@@ -26,7 +24,7 @@ eingerichtet werden kann.
 | iMac   | Late 2019 | 24″ 5K   | **Getestet** | CS8409 via DKMS                           |
 | iMac   | 2018      | diverse  | **Erwartet** | vermutlich CS8409; Rückmeldung willkommen |
 
-
+Eine mögliche Kompatibilität anderer iMACs oder MacBooks lässt sich über den im Tools-Ordner hinterlegten Compability-Checker überprüfen.
 ---
 
 🚀 **Installation**
