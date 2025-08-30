@@ -27,17 +27,17 @@ In diesem **HowTo** geht es ausschließlich um Geräte mit
 Eine **mögliche Kompatibilität anderer iMAC- oder MacBook-Modelle** lässt sich über den im Tools-Ordner hinterlegten **Compability-Checker** überprüfen.
 
 ---
-ℹ️ Hinweis zur Installation
+ℹ️ **Hinweis zur Installation**
 
 Das Installationsskript bietet die gemeinsame oder separate Installation der erforderlichen WLAN-Firmware bzw. Audio-Treiber an.
 
-ℹ️ℹ️ Hinweis zu Kernel-Updates
+ℹ️ℹ️ **Hinweis zu Kernel-Updates**
 
 Ab einer bestimmten Kernel-Version kann es sein, dass die benötigten Treiber für WLAN (Broadcom BCM4364) und Audio (CS8409) bereits im Kernel enthalten sind. In diesem Fall funktionieren WLAN und Sound direkt nach einem Update – ohne zusätzliche Schritte.
 
 Sollte nach einem Kernel-Update jedoch kein WLAN oder kein Audio mehr verfügbar sein, dann müssen die hier beschriebenen Treiber/Module erneut installiert werden.
 
-Um diesen Prozess zu vereinfachen, können Sie am Ende des Installationsskripts optional einen zusätzlichen Service einrichten, der im Falle eines Kernel-Updates diesen Prozess automatisiert, sofern die benötigten Treiber noch nicht im Kernel verfügbar sind. 
+Um diesen Prozess zu vereinfachen, kannst du am Ende des Installationsskripts **optional** einen zusätzlichen Service einrichten, der im Falle eines Kernel-Updates diesen Prozess automatisiert, sofern die benötigten Treiber noch nicht im Kernel verfügbar sind. 
 
 🚀 **Installation**
 
