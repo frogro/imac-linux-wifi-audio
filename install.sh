@@ -117,13 +117,15 @@ main() {
   echo "1) WLAN installieren"
   echo "2) Audio installieren"
   echo "3) WLAN + Audio installieren"
-  echo -n "> Auswahl [1-3]: "
+  echo "4) Nur Service installieren"
+  echo -n "> Auswahl [1-4]: "
   read -r choice
 
   case "$choice" in
     1) copy_wifi ;;
     2) install_audio ;;
     3) copy_wifi; install_audio ;;
+    4) setup_service; exit 0 ;;
     *) echo "Ungültige Auswahl"; exit 3 ;;
   esac
 
