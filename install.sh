@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-### === Einstellungen (bitte anpassen) ===
-REPO_URL="https://github.com/frogro/imac-linux-wifi-audio.git"   # <- anpassen!
-REPO_BRANCH="main"                                 # optional: z.B. "main" oder "trixie"
-### =====================================
+### === Einstellungen ===
+REPO_URL="https://github.com/frogro/imac-linux-wifi-audio.git"
+REPO_BRANCH="main"   # ggf. anpassen
+### =====================
 
 bold(){ printf "\033[1m%s\033[0m\n" "$*"; }
 log(){ echo -e "$*"; }
@@ -53,8 +53,15 @@ wifi_ok(){
 }
 
 audio_ok(){
+  # 1) Modul geladen? (falls nicht built-in)
   lsmod | grep -q '^snd_hda_codec_cs8409' && return 0
-  [[ -r /proc/asound/cards ]] && egrep -qi 'cs8409|cirrus' /proc/asound/cards
+  # 2) ALSA-Karten zeigen CS8409/Cirrus?
+  [[ -r /proc/asound/cards ]] && grep -qiE 'cs8409|cirrus' /proc/asound/cards && return 0
+  # 3) aplay -l listet CS8409?
+  command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -qiE 'CS8409|Cirrus' && return 0
+  # 4) dmesg erwähnt CS8409?
+  command -v dmesg >/dev/null 2>&1 && dmesg | grep -qi cs8409 && return 0
+  return 1
 }
 
 copy_wifi() {
@@ -125,6 +132,10 @@ main() {
   if [[ "${yn,,}" == "y" ]]; then
     setup_service
   fi
+
+  # kurze Re-Initialisierung, falls Module gerade frisch geladen wurden
+  sleep 1
+  command -v alsactl >/dev/null 2>&1 && alsactl init >/dev/null 2>&1 || true
 
   local st
   st=$(already_ok)
