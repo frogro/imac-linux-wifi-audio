@@ -2,7 +2,8 @@ Broadcom / Apple WiFi Firmware Notice
 -------------------------------------
 
 This repository redistributes binary firmware files for Broadcom BCM4364
-chipsets (variants b2 and b3), originally extracted from macOS / Apple hardware.
+chipsets (variants b2 and b3), originally extracted from macOS / Apple hardware 
+(Source: reynaldliu/macbook16-1-wifi-bcm4364-binary).
 
 - Copyright (C) Broadcom / Apple Inc.
 - No license under MIT or GPL applies to these files.
