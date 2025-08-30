@@ -24,7 +24,7 @@ In diesem **HowTo** geht es ausschließlich um Geräte mit
 | iMac   | Late 2019 | 24″ 5K   | **Getestet** | CS8409 via DKMS                           |
 | iMac   | 2018      | diverse  | **Erwartet** | vermutlich CS8409; Rückmeldung willkommen |
 
-Eine **mögliche Kompatibilität anderer iMACs oder MacBooks** lässt sich über den im Tools-Ordner hinterlegten **Compability-Checker** überprüfen.
+Eine **mögliche Kompatibilität anderer iMAC- oder MacBook-Modelle** lässt sich über den im Tools-Ordner hinterlegten **Compability-Checker** überprüfen.
 
 ---
 ℹ️ Hinweis zur Installation
@@ -100,6 +100,6 @@ Das Skript:
 
 * Cirrus Logic Treiber: GPLv2 (wird aus Linux-Kernel extrahiert) 
 
-* Skripte & Dokumentation: © 2025 frogro, veröffentlicht unter der MIT License, siehe auch LICENSE
+* Skripte & Dokumentation: © 2025 frogro, veröffentlicht unter der MIT License, siehe auch LICENSE.
 
 ⚠️ Getestet ausschließlich mit Debian 13 (trixie). Andere Linux-Distros/Versionen können funktionieren, jedoch ohne Garantie.
