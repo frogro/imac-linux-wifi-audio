@@ -3,9 +3,10 @@ set -euo pipefail
 
 # Installiert/aktualisiert:
 #  - Root-Check + Timer:   /usr/local/bin/imac-wifi-audio-check.sh
-#  - Root-Fix-Helper:      /usr/local/sbin/imac-wifi-audio-fix.sh  (ruft cirruslogic/* auf und kopiert WiFi-Firmware aus dem Repo)
+#  - Root-Fix-Helper:      /usr/local/sbin/imac-wifi-audio-fix.sh
 #  - Polkit-Regel:         /usr/share/polkit-1/actions/com.frogro.imacwifi.policy
 #  - User-Notifier (+timer): $HOME/.config/systemd/user/imac-wifi-audio-notify.*
+#  - FW-Mirror (persistent): /usr/local/share/imac-linux-wifi-audio/broadcom/{b2,b3}
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 STATE_DIR="/var/lib/imac-linux-wifi-audio"
@@ -20,11 +21,36 @@ CHECK_BIN="/usr/local/bin/imac-wifi-audio-check.sh"
 FIX_BIN="/usr/local/sbin/imac-wifi-audio-fix.sh"
 POLKIT_POLICY="/usr/share/polkit-1/actions/com.frogro.imacwifi.policy"
 
+# Persistenter Firmware-Speicher (Mirror des Repo-Verzeichnisses)
+SHARE_FW_BASE="/usr/local/share/imac-linux-wifi-audio/broadcom"
+SHARE_FW_B2="${SHARE_FW_BASE}/b2"
+SHARE_FW_B3="${SHARE_FW_BASE}/b3"
+
 need_root(){ if [[ $EUID -ne 0 ]]; then echo "Bitte mit sudo ausführen." >&2; exit 1; fi }
 need_root
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$SHARE_FW_B2" "$SHARE_FW_B3"
 
+# --- 0) Firmware aus dem Repo einmalig spiegeln (falls vorhanden) ---
+mirror_variant() {
+  local src="$1" dst="$2"
+  [[ -d "$src" ]] || return 0
+  shopt -s nullglob
+  local n=0
+  for f in "$src"/brcmfmac4364*; do
+    install -m 0644 "$f" "$dst/"
+    ((n++))
+  done
+  echo "$n"
+}
+
+# Spiegle b2/b3 ohne zu verlangen, dass alle Dateitypen vorhanden sind
+C1=$(mirror_variant "${REPO_ROOT}/broadcom/b2" "$SHARE_FW_B2" || echo 0)
+C2=$(mirror_variant "${REPO_ROOT}/broadcom/b3" "$SHARE_FW_B3" || echo 0)
+# (keine harte Aktion, nur Info)
+echo "FW-Mirror: b2=${C1} Dateien, b3=${C2} Dateien unter ${SHARE_FW_BASE}"
+
+# --- 1) ROOT-Check Script ---
 cat >"$CHECK_BIN" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -65,7 +91,7 @@ echo "{
   \"checked_at\": \"$(date -Iseconds)\"
 }" > "$STATUS_JSON"
 
-# Flags setzen
+# Flags setzen/entfernen
 [[ $ok_wifi -eq 0 ]] && touch "$FLAG_WIFI_NEEDED" || rm -f "$FLAG_WIFI_NEEDED" 2>/dev/null || true
 [[ $ok_audio -eq 0 ]] && touch "$FLAG_AUDIO_NEEDED" || rm -f "$FLAG_AUDIO_NEEDED" 2>/dev/null || true
 
@@ -76,9 +102,9 @@ fi
 
 exit 0
 EOF
+chmod 0755 "$CHECK_BIN"
 
-install -m 0755 "$CHECK_BIN" "$CHECK_BIN"
-
+# --- 2) FIX-Helper (WiFi zuerst im SHARE suchen, dann im REPO) ---
 cat >"$FIX_BIN" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -86,44 +112,95 @@ REPO_ROOT="$REPO_ROOT"
 STATE_DIR="$STATE_DIR"
 FLAG_AUDIO_NEEDED="$FLAG_AUDIO_NEEDED"
 FLAG_WIFI_NEEDED="$FLAG_WIFI_NEEDED"
+SHARE_FW_BASE="$SHARE_FW_BASE"
+SHARE_FW_B2="$SHARE_FW_B2"
+SHARE_FW_B3="$SHARE_FW_B3"
 
 usage(){ echo "Usage: \$0 [--wifi] [--audio]"; }
 
-fix_wifi(){
-  echo "==> (WiFi) Kopiere Firmware aus Repo und lade Modul neu"
-  install -d /lib/firmware/brcm
+copy_fw_variant(){
+  # copy_fw_variant <srcdir>  (copies all brcmfmac4364* files if src exists)
+  local src="\$1"
+  [[ -d "\$src" ]] || return 0
   shopt -s nullglob
-  cnt=0
-  for sub in b2 b3; do
-    for f in "\${REPO_ROOT}/broadcom/\${sub}"/*; do
-      install -m 0644 "\$f" /lib/firmware/brcm/
-      ((cnt++))
-    done
+  local k=0
+  for f in "\$src"/brcmfmac4364*; do
+    install -m 0644 "\$f" /lib/firmware/brcm/
+    ((k++))
   done
-  echo "   → \${cnt} Dateien aktualisiert."
-  modprobe -r brcmfmac 2>/dev/null || true
-  modprobe brcmfmac || true
-  command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u || true
+  echo "\$k"
+}
+
+set_symlinks_if_present(){
+  # set_symlinks_if_present <prefix> <apple_variant>
+  # example: set_symlinks_if_present "brcmfmac4364b2-pcie" "apple,midway"
+  local base="\$1" ; local apple="\$2"
+  local dir="/lib/firmware/brcm"
+  pushd "\$dir" >/dev/null || return 0
+  local src_bin="\${base}.\${apple}.bin"
+  local src_txt="\${base}.\${apple}.txt"
+  local src_clm="\${base}.\${apple}.clm_blob"
+  local src_txcap="\${base}.\${apple}.txcap_blob"
+
+  [[ -f "\$src_bin"  ]] && ln -sf "\$src_bin"   "\${base}.bin"
+  [[ -f "\$src_txt"  ]] && ln -sf "\$src_txt"   "\${base}.txt"   || echo "⚠️  Hinweis: NVRAM (.txt) für \${base} fehlt – Treiber lädt oft trotzdem, ggf. NVRAM später ergänzen."
+  [[ -f "\$src_clm"  ]] && ln -sf "\$src_clm"   "\${base}.clm_blob"
+  [[ -f "\$src_txcap" ]] && ln -sf "\$src_txcap" "\${base}.txcap_blob"
+  popd >/dev/null || true
+}
+
+fix_wifi(){
+  echo "==> (WiFi) Firmware aktualisieren & Stack neu laden"
+
+  install -d /lib/firmware/brcm
+
+  # 1) Aus persistentem Mirror kopieren (b2/b3)
+  local c1 c2
+  c1=\$(copy_fw_variant "\$SHARE_FW_B2" || echo 0)
+  c2=\$(copy_fw_variant "\$SHARE_FW_B3" || echo 0)
+
+  # 2) Falls im Mirror nichts war, versuche direkt aus dem Repo
+  if [[ "\$c1" -eq 0 && "\$c2" -eq 0 ]]; then
+    c1=\$(copy_fw_variant "\$REPO_ROOT/broadcom/b2" || echo 0)
+    c2=\$(copy_fw_variant "\$REPO_ROOT/broadcom/b3" || echo 0)
+  fi
+  echo "   → Dateien kopiert: b2=\$c1, b3=\$c2"
+
+  # 3) Symlinks für die üblichen Varianten setzen (sofern Quellen existieren)
+  set_symlinks_if_present "brcmfmac4364b2-pcie" "apple,midway"
+  set_symlinks_if_present "brcmfmac4364b3-pcie" "apple,borneo"
+
+  # 4) potentiellen STA-Treiber entfernen
+  modprobe -r wl 2>/dev/null || true
+
+  # 5) Stack neu laden & NM aktivieren
+  modprobe -r brcmfmac brcmutil cfg80211 2>/dev/null || true
+  modprobe cfg80211
+  modprobe brcmutil
+  modprobe brcmfmac
+  rfkill unblock wifi 2>/dev/null || true
+  systemctl restart NetworkManager 2>/dev/null || true
+
   if lsmod | grep -q '^brcmfmac'; then
     echo "✅ WLAN Modul aktiv."
-    rm -f "\${FLAG_WIFI_NEEDED}" 2>/dev/null || true
+    rm -f "\$FLAG_WIFI_NEEDED" 2>/dev/null || true
   else
-    echo "⚠️  WLAN weiterhin nicht aktiv. Bitte Kernel/Logs prüfen."
+    echo "⚠️  WLAN weiterhin nicht aktiv. Prüfe dmesg für fehlende Dateien."
   fi
 }
 
 fix_audio(){
-  echo "==> (Audio) Versuche Modulbereitstellung aus Kernelpaket"
-  if [[ -x "\${REPO_ROOT}/cirruslogic/extract_from_kernelpkg.sh" ]]; then
-    sudo "\${REPO_ROOT}/cirruslogic/extract_from_kernelpkg.sh" || true
+  echo "==> (Audio) CS8409 bereitstellen"
+  if [[ -x "\$REPO_ROOT/cirruslogic/extract_from_kernelpkg.sh" ]]; then
+    sudo "\$REPO_ROOT/cirruslogic/extract_from_kernelpkg.sh" || true
   fi
-  if [[ -x "\${REPO_ROOT}/cirruslogic/install_cs8409_manual.sh" ]]; then
-    sudo "\${REPO_ROOT}/cirruslogic/install_cs8409_manual.sh" --autoload || true
+  if [[ -x "\$REPO_ROOT/cirruslogic/install_cs8409_manual.sh" ]]; then
+    sudo "\$REPO_ROOT/cirruslogic/install_cs8409_manual.sh" --autoload || true
   fi
   sudo depmod -a || true
   if lsmod | grep -q '^snd_hda_codec_cs8409'; then
     echo "✅ Audio aktiv."
-    rm -f "\${FLAG_AUDIO_NEEDED}" 2>/dev/null || true
+    rm -f "\$FLAG_AUDIO_NEEDED" 2>/dev/null || true
   else
     echo "⚠️  Audio weiterhin nicht aktiv."
   fi
@@ -141,10 +218,9 @@ done
 (( DO_WIFI )) && fix_wifi
 (( DO_AUDIO )) && fix_audio
 EOF
+chmod 0755 "$FIX_BIN"
 
-install -m 0755 "$FIX_BIN" "$FIX_BIN"
-
-# Root service + timer
+# --- 3) Root service + timer ---
 cat >"$SERVICE" <<'EOF'
 [Unit]
 Description=iMac WiFi/Audio Status-Check (root, no-install)
@@ -175,7 +251,7 @@ systemctl daemon-reload
 systemctl enable --now imac-wifi-audio-check.service
 systemctl enable --now imac-wifi-audio-check.timer
 
-# Polkit Policy für pkexec
+# --- 4) Polkit Policy für pkexec ---
 cat >"$POLKIT_POLICY" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
@@ -195,7 +271,7 @@ cat >"$POLKIT_POLICY" <<'EOF'
 </policyconfig>
 EOF
 
-# User-Notifier (fragt separat nach WLAN/Audio) – jetzt mit Live-Kernel via uname -r
+# --- 5) User-Notifier (live uname -r) ---
 USER_UNIT_DIR="${SUDO_USER:+/home/${SUDO_USER}/.config/systemd/user}"
 if [[ -n "${USER_UNIT_DIR}" && -d "${USER_UNIT_DIR%/*}" ]]; then
   mkdir -p "$USER_UNIT_DIR"
@@ -226,7 +302,7 @@ ask_yes_no(){
 kernel="$(uname -r)"
 
 if [[ -f "$FLAG_WIFI_NEEDED" ]]; then
-  msg_wifi="Nach dem Kernel-Update auf Version ${kernel} ist WLAN nicht aktiv. Soll ich die im Repo enthaltene Broadcom-Firmware neu einrichten und das Modul neu laden?"
+  msg_wifi="Nach dem Kernel-Update auf Version ${kernel} ist WLAN nicht aktiv. Soll ich die Broadcom-Firmware (b2/b3) neu einrichten und das Modul neu laden?"
   if ask_yes_no "$msg_wifi"; then
     pkexec /usr/local/sbin/imac-wifi-audio-fix.sh --wifi || true
   fi
@@ -269,4 +345,4 @@ EOF
   su - "${SUDO_USER}" -c "systemctl --user daemon-reload && systemctl --user enable --now imac-wifi-audio-notify.timer" || true
 fi
 
-echo "✅ Root-Check, pkexec-Helper und User-Notifier aktualisiert (Notifier zeigt Live-Kernel via uname -r)."
+echo "✅ Root-Check, pkexec-Helper, User-Notifier & persistenter FW-Mirror eingerichtet."
