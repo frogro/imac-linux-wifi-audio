@@ -129,7 +129,7 @@ main() {
     *) echo "Ungültige Auswahl"; exit 3 ;;
   esac
 
-  echo -n "\nService zur Kernel-Update-Prüfung einrichten? [y/N]: "
+  printf "\nService zur Kernel-Update-Prüfung einrichten? [y/n]: "
   read -r yn
   if [[ "${yn,,}" == "y" ]]; then
     setup_service
