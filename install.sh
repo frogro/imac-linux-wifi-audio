@@ -1,12 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+### === Einstellungen (bitte anpassen) ===
+REPO_URL="https://github.com/<USER>/<REPO>.git"   # <- anpassen!
+REPO_BRANCH="main"                                 # optional: z.B. "main" oder "trixie"
+### =====================================
+
+bold(){ printf "\033[1m%s\033[0m\n" "$*"; }
+log(){ echo -e "$*"; }
+need_root(){ if [[ $EUID -ne 0 ]]; then echo "Bitte mit sudo ausführen." >&2; exit 1; fi }
+
+# Prüft, ob erwartete Struktur unter $1 vorhanden ist
+has_repo_layout() {
+  local base="$1"
+  [[ -f "$base/cirruslogic/install_cs8409_manual.sh" ]] \
+  && [[ -f "$base/cirruslogic/extract_from_kernelpkg.sh" ]] \
+  && [[ -d "$base/broadcom" ]]
+}
+
+# Versuche, echtes Repo-Root zu bestimmen (Skriptverzeichnis)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
+TMPROOT=""
+CLEANUP=0
+
+# Wenn die Struktur neben install.sh fehlt → Repo nach /tmp klonen
+if ! has_repo_layout "$REPO_ROOT"; then
+  if ! command -v git >/dev/null 2>&1; then
+    echo "❌ Git nicht gefunden und Repo-Struktur fehlt. Bitte git installieren (apt install git) oder vollständiges Repo bereitstellen."
+    exit 2
+  fi
+  TMPROOT="$(mktemp -d /tmp/imac-linux-wifi-audio.XXXXXX)"
+  CLEANUP=1
+  bold "==> Klone Repo nach: $TMPROOT"
+  if [[ -n "$REPO_BRANCH" ]]; then
+    git clone --depth=1 --branch "$REPO_BRANCH" "$REPO_URL" "$TMPROOT"
+  else
+    git clone --depth=1 "$REPO_URL" "$TMPROOT"
+  fi
+  REPO_ROOT="$TMPROOT"
+  # Aufräumen bei Exit
+  trap '[[ $CLEANUP -eq 1 ]] && rm -rf "$TMPROOT"' EXIT
+fi
+
+# Ab hier: normaler Installer-Flow, arbeitet aus $REPO_ROOT
 MANIFEST_DIR="/var/lib/imac-linux-wifi-audio"
 MANIFEST_FILE="${MANIFEST_DIR}/manifest.txt"
-
-need_root() { if [[ $EUID -ne 0 ]]; then echo "Bitte mit sudo ausführen." >&2; exit 1; fi }
-log() { echo -e "$@"; }
 
 wifi_ok(){
   command -v ip >/dev/null 2>&1 && ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi)' && return 0
@@ -20,12 +59,10 @@ audio_ok(){
 
 copy_wifi() {
   if wifi_ok; then
-    log "
-✔ WLAN ist bereits aktiv (OOTB) – überspringe Firmware-Installation."
+    log "\n✔ WLAN ist bereits aktiv (OOTB) – überspringe Firmware-Installation."
     return 0
   fi
-  log "
-==> WLAN-Firmware kopieren (b2 + b3)"
+  log "\n==> WLAN-Firmware kopieren (b2 + b3)"
   install -d /lib/firmware/brcm
   local cnt=0
   shopt -s nullglob
@@ -43,12 +80,11 @@ copy_wifi() {
 
 install_audio() {
   if audio_ok; then
-    log "
-✔ Audio (CS8409) ist bereits aktiv (OOTB) – überspringe Installation."
+    log "\n✔ Audio (CS8409) ist bereits aktiv (OOTB) – überspringe Installation."
     return 0
   fi
-  log "
-==> Audio (CS8409) aktivieren"
+  log "\n==> Audio (CS8409) aktivieren"
+  chmod +x "${REPO_ROOT}/cirruslogic/"*.sh || true
   bash "${REPO_ROOT}/cirruslogic/install_cs8409_manual.sh" --autoload || true
   echo "MODULE:snd_hda_codec_cs8409" >>"${MANIFEST_FILE}"
 }
@@ -61,6 +97,7 @@ already_ok() {
 }
 
 setup_service() {
+  chmod +x "${REPO_ROOT}/kernel_update_service.sh" || true
   bash "${REPO_ROOT}/kernel_update_service.sh"
 }
 
@@ -69,7 +106,7 @@ main() {
   mkdir -p "${MANIFEST_DIR}"
   touch "${MANIFEST_FILE}"
 
-  echo "== iMac Linux WiFi + Audio Installer =="
+  bold "== iMac Linux WiFi + Audio Installer =="
   echo "1) WLAN installieren"
   echo "2) Audio installieren"
   echo "3) WLAN + Audio installieren"
@@ -80,11 +117,10 @@ main() {
     1) copy_wifi ;;
     2) install_audio ;;
     3) copy_wifi; install_audio ;;
-    *) echo "Ungültige Auswahl"; exit 2 ;;
+    *) echo "Ungültige Auswahl"; exit 3 ;;
   esac
 
-  echo -n "
-Service zur Kernel-Update-Prüfung einrichten? [y/N]: "
+  echo -n "\nService zur Kernel-Update-Prüfung einrichten? [y/N]: "
   read -r yn
   if [[ "${yn,,}" == "y" ]]; then
     setup_service
@@ -92,13 +128,11 @@ Service zur Kernel-Update-Prüfung einrichten? [y/N]: "
 
   local st
   st=$(already_ok)
-  echo "
-== Zusammenfassung =="
+  echo -e "\n== Zusammenfassung =="
   echo "WLAN aktiv:  $( [[ ${st%%:*} -eq 1 ]] && echo Ja || echo Nein )"
   echo "Audio aktiv: $( [[ ${st##*:} -eq 1 ]] && echo Ja || echo Nein )"
   echo "Manifest: ${MANIFEST_FILE}"
-  echo "
-Fertig. Ein Neustart wird empfohlen."
+  echo -e "\nFertig. Ein Neustart wird empfohlen."
 }
 
 main "$@"
