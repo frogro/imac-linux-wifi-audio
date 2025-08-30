@@ -18,6 +18,37 @@ has_repo_layout() {
   && [[ -d "$base/broadcom" ]]
 }
 
+# Popup-Tool (zenity/kdialog) passend zur Desktop-Umgebung installieren (falls keins vorhanden)
+install_popup_tool() {
+  # Schon vorhanden?
+  if command -v zenity >/dev/null 2>&1 || command -v kdialog >/dev/null 2>&1; then
+    return
+  fi
+
+  # Desktop-Erkennung (einfach, genügt in Praxis)
+  local desktop="${XDG_CURRENT_DESKTOP:-}${DESKTOP_SESSION:-}"
+  echo "==> Prüfe GUI für Popup-Tool (gefunden: ${desktop:-<unbekannt>})"
+
+  # Noninteractive APT
+  export DEBIAN_FRONTEND=noninteractive
+
+  case "$desktop" in
+    *KDE*|*Plasma*|*kde*)
+      echo "==> Installiere kdialog (KDE/Plasma)"
+      apt-get update -y
+      apt-get install -y kdialog || echo "⚠️  KDialog konnte nicht installiert werden. Fallback: Terminal-Prompts."
+      ;;
+    *GNOME*|*X-Cinnamon*|*MATE*|*XFCE*|*LXDE*|*LXQt*|*Unity*|*Budgie*|*Deepin*|*Pantheon*)
+      echo "==> Installiere zenity (GTK-Desktop)"
+      apt-get update -y
+      apt-get install -y zenity || echo "⚠️  Zenity konnte nicht installiert werden. Fallback: Terminal-Prompts."
+      ;;
+    *)
+      echo "⚠️  Keine bekannte Desktop-Umgebung erkannt. Bitte installiere manuell 'zenity' oder 'kdialog', sonst gibt es nur Terminal-Prompts."
+      ;;
+  esac
+}
+
 # Versuche, echtes Repo-Root zu bestimmen (Skriptverzeichnis)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
@@ -104,6 +135,8 @@ already_ok() {
 }
 
 setup_service() {
+  # Popup-Tool je nach GUI nachinstallieren (falls keines vorhanden)
+  install_popup_tool
   chmod +x "${REPO_ROOT}/kernel_update_service.sh" || true
   bash "${REPO_ROOT}/kernel_update_service.sh"
 }
@@ -118,7 +151,7 @@ main() {
   echo "2) Audio installieren"
   echo "3) WLAN + Audio installieren"
   echo "4) Nur Service installieren"
-  echo -n "> Auswahl [1-4]: "
+  printf "> Auswahl [1-4]: "
   read -r choice
 
   case "$choice" in
@@ -129,7 +162,7 @@ main() {
     *) echo "Ungültige Auswahl"; exit 3 ;;
   esac
 
-  printf "\nService zur Kernel-Update-Prüfung einrichten? [y/n]: "
+  printf "\nService zur Kernel-Update-Prüfung einrichten? [y/N]: "
   read -r yn
   if [[ "${yn,,}" == "y" ]]; then
     setup_service
