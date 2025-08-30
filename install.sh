@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ### === Einstellungen (bitte anpassen) ===
-REPO_URL="https://github.com/<USER>/<REPO>.git"   # <- anpassen!
+REPO_URL="https://github.com/frogro/imac-linux-wifi-audio.git"   # <- anpassen!
 REPO_BRANCH="main"                                 # optional: z.B. "main" oder "trixie"
 ### =====================================
 
