@@ -94,7 +94,7 @@ Das Skript:
 
 **Broadcom WLAN Firmware (b2/b3):** proprietär, Copyright © Broadcom**  
 - Bereitstellung in diesem Repository erfolgt **ausschließlich zu Test- und Kompatibilitätszwecken**.
-- Ursprüngliche Quelle: reynaldliu/macbook16-1-wifi-bcm4364-binary.
+- Quelle: reynaldliu/macbook16-1-wifi-bcm4364-binary.
 - Falls rechtlich problematisch, bitte Firmware direkt aus der Originalquelle beziehen.
 - siehe auch: FIRMWARE-NOTICE
 
