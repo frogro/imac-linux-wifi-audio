@@ -1,114 +1,61 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="imac-linux-wifi-audio"
-MANIFEST="/var/lib/${APP_NAME}/manifest.txt"
-FW_DIR="/lib/firmware/brcm"
-DKMS_NAME="snd-hda-codec-cs8409"
-DKMS_VER="1.0"
+MANIFEST_FILE="/var/lib/imac-linux-wifi-audio/manifest.txt"
 
-bold() { printf "\e[1m%s\e[0m\n" "$*"; }
-info() { printf "==> %s\n" "$*"; }
-warn() { printf "\e[33m[WARN]\e[0m %s\n" "$*"; }
-err()  { printf "\e[31m[ERR]\e[0m %s\n" "$*"; }
+need_root() { if [[ $EUID -ne 0 ]]; then echo "Bitte mit sudo ausführen." >&2; exit 1; fi }
+usage(){ echo "Usage: $0 [--wifi|--audio|--service]"; }
 
-require_root() {
-  if [[ $EUID -ne 0 ]]; then
-    err "Bitte mit sudo/root ausführen."
-    exit 1
+remove_wifi(){
+  echo "==> Entferne WLAN-Firmware laut Manifest"
+  if [[ -f "$MANIFEST_FILE" ]]; then
+    grep '/lib/firmware/brcm/' "$MANIFEST_FILE" | while read -r f; do
+      [[ -f "$f" ]] && rm -f "$f"
+    done
+    sed -i '/\/lib\/firmware\/brcm\//d' "$MANIFEST_FILE"
   fi
+  modprobe -r brcmfmac 2>/dev/null || true
 }
 
-remove_file() {
-  local p="$1"
-  if [[ -e "$p" || -L "$p" ]]; then
-    rm -f "$p" && echo "REMOVED $p"
-  fi
-}
-
-remove_wifi() {
-  bold "WLAN-Dateien entfernen…"
-  # Falls ein Manifest existiert, nutzen wir es bevorzugt.
-  if [[ -f "$MANIFEST" ]]; then
-    grep -E '^FW:' "$MANIFEST" | cut -d' ' -f2- | while read -r f; do
-      remove_file "$f"
-    done
-  else
-    # Fallback: bekannte Dateinamen aus diesem Repo entfernen (b2/b3)
-    for f in \
-      brcmfmac4364b2-pcie.bin \
-      brcmfmac4364b2-pcie.clm_blob \
-      brcmfmac4364b2-pcie.txcap_blob \
-      brcmfmac4364b2-pcie.apple,midway.bin \
-      brcmfmac4364b2-pcie.apple,midway.clm_blob \
-      brcmfmac4364b2-pcie.apple,midway.txcap_blob \
-      brcmfmac4364b3-pcie.bin \
-      brcmfmac4364b3-pcie.clm_blob \
-      brcmfmac4364b3-pcie.txcap_blob \
-      brcmfmac4364b3-pcie.apple,borneo.bin \
-      brcmfmac4364b3-pcie.apple,borneo.clm_blob \
-      brcmfmac4364b3-pcie.apple,borneo.txcap_blob
-    do
-      remove_file "${FW_DIR}/${f}"
-    done
-  fi
-  # Firmware-Cache neu einlesen
-  if command -v update-initramfs >/dev/null 2>&1; then
-    info "Initramfs aktualisieren…"
-    update-initramfs -u || true
-  fi
+remove_audio(){
+  echo "==> Entferne CS8409 Modul aus aktuellem Kernel"
+  modprobe -r snd_hda_codec_cs8409 2>/dev/null || true
+  for p in \
+    "/lib/modules/$(uname -r)/kernel/sound/pci/hda/snd-hda-codec-cs8409.ko" \
+    "/lib/modules/$(uname -r)/kernel/sound/pci/hda/snd-hda-codec-cs8409.ko.xz"; do
+    [[ -f "$p" ]] && rm -f "$p"
+  done
+  rm -f "/etc/modules-load.d/snd_hda_codec_cs8409.conf" || true
   depmod -a || true
+  sed -i '/^MODULE:snd_hda_codec_cs8409$/d' "$MANIFEST_FILE" 2>/dev/null || true
 }
 
-remove_audio() {
-  bold "CS8409 (Cirrus) DKMS entfernen…"
-  if dkms status | grep -q "^${DKMS_NAME}/${DKMS_VER}"; then
-    dkms remove -m "${DKMS_NAME}" -v "${DKMS_VER}" --all || true
-  fi
-  # evtl. im Build-Verzeichnis zurückgebliebene Reste entfernen
-  rm -rf "/var/lib/dkms/${DKMS_NAME}/${DKMS_VER}" || true
-  rm -rf "/usr/src/${DKMS_NAME}-${DKMS_VER}" || true
+remove_service(){
+  echo "==> Deaktiviere & entferne Systemd-Units"
+  systemctl disable --now imac-wifi-audio-check.service 2>/dev/null || true
+  systemctl disable --now imac-wifi-audio-check.timer 2>/dev/null || true
+  rm -f /usr/local/bin/imac-wifi-audio-check.sh
+  rm -f /etc/systemd/system/imac-wifi-audio-check.service
+  rm -f /etc/systemd/system/imac-wifi-audio-check.timer
+  systemctl daemon-reload || true
 }
 
-usage() {
-  cat <<EOF
-Uninstaller für ${APP_NAME}
+main(){
+  need_root
+  local do_wifi=1 do_audio=1 do_service=1
+  case "${1:-all}" in
+    --wifi)    do_audio=0; do_service=0 ;;
+    --audio)   do_wifi=0;  do_service=0 ;;
+    --service) do_wifi=0;  do_audio=0 ;;
+    all) ;;
+    *) [[ -n "${1:-}" ]] && usage && exit 2 ;;
+  esac
 
-Verwendung:
-  sudo ./uninstall.sh [--wifi] [--audio]
+  [[ $do_wifi -eq 1 ]] && remove_wifi
+  [[ $do_audio -eq 1 ]] && remove_audio
+  [[ $do_service -eq 1 ]] && remove_service
 
-Ohne Flags werden WLAN + Audio deinstalliert.
-EOF
-}
-
-main() {
-  require_root
-
-  WIFI=1
-  AUDIO=1
-  if [[ $# -gt 0 ]]; then
-    WIFI=0; AUDIO=0
-    for a in "$@"; do
-      case "$a" in
-        --wifi) WIFI=1 ;;
-        --audio) AUDIO=1 ;;
-        -h|--help) usage; exit 0 ;;
-        *) warn "Unbekannte Option: $a" ;;
-      esac
-    done
-  fi
-
-  [[ $WIFI -eq 1 ]] && remove_wifi
-  [[ $AUDIO -eq 1 ]] && remove_audio
-
-  # Manifest-Verzeichnis aufräumen
-  if [[ -d "/var/lib/${APP_NAME}" ]]; then
-    rm -f "$MANIFEST"
-    rmdir "/var/lib/${APP_NAME}" 2>/dev/null || true
-  fi
-
-  bold "✔ Deinstallation abgeschlossen."
-  echo "Ein Reboot ist empfohlen: sudo reboot"
+  echo "✅ Deinstallation abgeschlossen."
 }
 
 main "$@"
