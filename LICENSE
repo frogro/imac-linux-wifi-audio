@@ -3,8 +3,8 @@ This repository contains multiple components under different licenses:
 1. Scripts, DKMS setup, documentation:
    Licensed under the MIT License (see section "MIT License" below).
 
-2. snd-hda-codec-cs8409 driver:
-   Based on work from https://github.com/egorenar/snd-hda-codec-cs8409
+2. Cirrus Logic CS8409 (snd-hda-codec-cs8409) audio driver:
+   Extractzed from Linux Kernel
    Licensed under the GNU General Public License, version 2 (GPLv2).
    See <https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt>
 
