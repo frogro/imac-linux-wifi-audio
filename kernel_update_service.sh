@@ -34,8 +34,7 @@ STATUS_JSON="${STATE_DIR}/status.json"
 FLAG_AUDIO_NEEDED="${STATE_DIR}/needs_audio_fix"
 FLAG_WIFI_NEEDED="${STATE_DIR}/needs_wifi_fix"
 
-log(){ printf "[imac-wifi-audio-check] %s
-" "$*"; }
+log(){ printf "[imac-wifi-audio-check] %s\n" "$*"; }
 
 has_wifi_iface(){
   command -v ip >/dev/null 2>&1 || return 1
@@ -137,7 +136,6 @@ for a in "\$@"; do
     --audio) DO_AUDIO=1 ;;
     *) usage; exit 2 ;;
   esac
-
 done
 
 (( DO_WIFI )) && fix_wifi
@@ -197,7 +195,7 @@ cat >"$POLKIT_POLICY" <<'EOF'
 </policyconfig>
 EOF
 
-# User-Notifier (fragt separat nach WLAN/Audio)
+# User-Notifier (fragt separat nach WLAN/Audio) – jetzt mit Live-Kernel via uname -r
 USER_UNIT_DIR="${SUDO_USER:+/home/${SUDO_USER}/.config/systemd/user}"
 if [[ -n "${USER_UNIT_DIR}" && -d "${USER_UNIT_DIR%/*}" ]]; then
   mkdir -p "$USER_UNIT_DIR"
@@ -209,7 +207,6 @@ set -euo pipefail
 STATE_DIR="/var/lib/imac-linux-wifi-audio"
 FLAG_AUDIO_NEEDED="${STATE_DIR}/needs_audio_fix"
 FLAG_WIFI_NEEDED="${STATE_DIR}/needs_wifi_fix"
-STATUS_JSON="${STATE_DIR}/status.json"
 
 ask_yes_no(){
   local msg="$1"
@@ -226,17 +223,17 @@ ask_yes_no(){
   fi
 }
 
-kernel="$(jq -r .kernel "$STATUS_JSON" 2>/dev/null || uname -r)"
+kernel="$(uname -r)"
 
 if [[ -f "$FLAG_WIFI_NEEDED" ]]; then
-  msg_wifi="Nach dem Kernel‑Update auf Version ${kernel} ist WLAN nicht aktiv. Soll ich die im Repo enthaltene Broadcom‑Firmware neu einrichten und das Modul neu laden?"
+  msg_wifi="Nach dem Kernel-Update auf Version ${kernel} ist WLAN nicht aktiv. Soll ich die im Repo enthaltene Broadcom-Firmware neu einrichten und das Modul neu laden?"
   if ask_yes_no "$msg_wifi"; then
     pkexec /usr/local/sbin/imac-wifi-audio-fix.sh --wifi || true
   fi
 fi
 
 if [[ -f "$FLAG_AUDIO_NEEDED" ]]; then
-  msg_audio="Nach dem Kernel‑Update auf Version ${kernel} konnte kein Audiotreiber (CS8409) geladen werden. Soll ich den zum Kernel passenden Treiber installieren?"
+  msg_audio="Nach dem Kernel-Update auf Version ${kernel} konnte kein Audiotreiber (CS8409) geladen werden. Soll ich den zum Kernel passenden Treiber installieren?"
   if ask_yes_no "$msg_audio"; then
     pkexec /usr/local/sbin/imac-wifi-audio-fix.sh --audio || true
   fi
@@ -272,4 +269,4 @@ EOF
   su - "${SUDO_USER}" -c "systemctl --user daemon-reload && systemctl --user enable --now imac-wifi-audio-notify.timer" || true
 fi
 
-echo "✅ Root-Check, pkexec-Helper und User-Notifier mit WLAN- und Audio-Dialog eingerichtet."
+echo "✅ Root-Check, pkexec-Helper und User-Notifier aktualisiert (Notifier zeigt Live-Kernel via uname -r)."
