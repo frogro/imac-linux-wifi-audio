@@ -8,7 +8,7 @@ REPO_BRANCH="main"   # ggf. anpassen
 
 bold(){ printf "\033[1m%s\033[0m\n" "$*"; }
 log(){ echo -e "$*"; }
-need_root(){ if [[ $EUID -ne 0 ]]; then echo "Bitte mit sudo ausführen." >&2; exit 1; fi }
+need_root(){ if [[ $EUID -ne 0 ]]; then echo "Bitte mit sudo ausführen."; exit 1; fi; }
 
 # Prüft, ob erwartete Struktur unter $1 vorhanden ist
 has_repo_layout() {
@@ -70,15 +70,15 @@ fi
 # Ab hier: normaler Installer-Flow, arbeitet aus $REPO_ROOT
 MANIFEST_DIR="/var/lib/imac-linux-wifi-audio"
 MANIFEST_FILE="${MANIFEST_DIR}/manifest.txt"
+mkdir -p "${MANIFEST_DIR}"
+touch "${MANIFEST_FILE}"
 
 wifi_ok(){
-  # Interface vorhanden?
   if command -v ip >/dev/null 2>&1; then
-    ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi)' && return 0
+    ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi)'
+    [[ $? -eq 0 ]] && return 0
   fi
-  # Modul geladen?
   lsmod | grep -q '^brcmfmac' && return 0
-  # dmesg-Hinweis?
   command -v dmesg >/dev/null 2>&1 && dmesg | grep -qi brcmfmac && return 0
   return 1
 }
@@ -94,6 +94,11 @@ audio_ok(){
 copy_wifi() {
   if wifi_ok; then
     log "\n✔ WLAN ist bereits aktiv – überspringe Firmware-Installation."
+    # trotzdem sicherstellen, dass NM läuft (Qual-of-life)
+    if systemctl list-unit-files | grep -q '^NetworkManager.service'; then
+      systemctl start NetworkManager 2>/dev/null || true
+      systemctl enable NetworkManager 2>/dev/null || true
+    fi
     return 0
   fi
 
@@ -126,18 +131,18 @@ copy_wifi() {
   # Generik-Symlinks für vorhandene Variante(n)
   if ls /lib/firmware/brcm/brcmfmac4364b2-pcie.apple,midway.* >/dev/null 2>&1; then
     ( cd /lib/firmware/brcm
-      ln -sf brcmfmac4364b2-pcie.apple,midway.bin        brcmfmac4364b2-pcie.bin
-      ln -sf brcmfmac4364b2-pcie.apple,midway.txt        brcmfmac4364b2-pcie.txt
-      ln -sf brcmfmac4364b2-pcie.apple,midway.clm_blob   brcmfmac4364b2-pcie.clm_blob
-      ln -sf brcmfmac4364b2-pcie.apple,midway.txcap_blob brcmfmac4364b2-pcie.txcap_blob
+      [[ -f brcmfmac4364b2-pcie.apple,midway.bin       ]] && ln -sf brcmfmac4364b2-pcie.apple,midway.bin        brcmfmac4364b2-pcie.bin
+      [[ -f brcmfmac4364b2-pcie.apple,midway.txt       ]] && ln -sf brcmfmac4364b2-pcie.apple,midway.txt        brcmfmac4364b2-pcie.txt || echo "⚠️  Hinweis: NVRAM (.txt) für 4364b2 fehlt."
+      [[ -f brcmfmac4364b2-pcie.apple,midway.clm_blob  ]] && ln -sf brcmfmac4364b2-pcie.apple,midway.clm_blob   brcmfmac4364b2-pcie.clm_blob
+      [[ -f brcmfmac4364b2-pcie.apple,midway.txcap_blob]] && ln -sf brcmfmac4364b2-pcie.apple,midway.txcap_blob brcmfmac4364b2-pcie.txcap_blob
     )
   fi
   if ls /lib/firmware/brcm/brcmfmac4364b3-pcie.apple,borneo.* >/dev/null 2>&1; then
     ( cd /lib/firmware/brcm
-      ln -sf brcmfmac4364b3-pcie.apple,borneo.bin        brcmfmac4364b3-pcie.bin
-      ln -sf brcmfmac4364b3-pcie.apple,borneo.txt        brcmfmac4364b3-pcie.txt
-      ln -sf brcmfmac4364b3-pcie.apple,borneo.clm_blob   brcmfmac4364b3-pcie.clm_blob
-      ln -sf brcmfmac4364b3-pcie.apple,borneo.txcap_blob brcmfmac4364b3-pcie.txcap_blob
+      [[ -f brcmfmac4364b3-pcie.apple,borneo.bin       ]] && ln -sf brcmfmac4364b3-pcie.apple,borneo.bin        brcmfmac4364b3-pcie.bin
+      [[ -f brcmfmac4364b3-pcie.apple,borneo.txt       ]] && ln -sf brcmfmac4364b3-pcie.apple,borneo.txt        brcmfmac4364b3-pcie.txt || echo "⚠️  Hinweis: NVRAM (.txt) für 4364b3 fehlt."
+      [[ -f brcmfmac4364b3-pcie.apple,borneo.clm_blob  ]] && ln -sf brcmfmac4364b3-pcie.apple,borneo.clm_blob   brcmfmac4364b3-pcie.clm_blob
+      [[ -f brcmfmac4364b3-pcie.apple,borneo.txcap_blob]] && ln -sf brcmfmac4364b3-pcie.apple,borneo.txcap_blob brcmfmac4364b3-pcie.txcap_blob
     )
   fi
 
@@ -153,8 +158,16 @@ copy_wifi() {
   modprobe cfg80211
   modprobe brcmutil
   modprobe brcmfmac
-  rfkill unblock wifi 2>/dev/null || true
-  systemctl restart NetworkManager 2>/dev/null || true
+
+  # 👉 NetworkManager starten + Autostart aktivieren (dein Wunsch)
+  if systemctl list-unit-files | grep -q '^NetworkManager.service'; then
+    log "==> Starte NetworkManager und aktiviere Autostart..."
+    systemctl start NetworkManager || true
+    systemctl enable NetworkManager || true
+    nmcli radio wifi on 2>/dev/null || true
+  else
+    log "⚠️  NetworkManager ist nicht installiert. Optional: sudo apt install network-manager"
+  fi
 }
 
 install_audio() {
@@ -183,8 +196,6 @@ setup_service() {
 
 main() {
   need_root
-  mkdir -p "${MANIFEST_DIR}"
-  touch "${MANIFEST_FILE}"
 
   bold "== iMac Linux WiFi + Audio Installer =="
   echo "1) WLAN installieren"
