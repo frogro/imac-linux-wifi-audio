@@ -20,18 +20,12 @@ has_repo_layout() {
 
 # Popup-Tool (zenity/kdialog) passend zur Desktop-Umgebung installieren (falls keins vorhanden)
 install_popup_tool() {
-  # Schon vorhanden?
   if command -v zenity >/dev/null 2>&1 || command -v kdialog >/dev/null 2>&1; then
     return
   fi
-
-  # Desktop-Erkennung (einfach, genügt in Praxis)
   local desktop="${XDG_CURRENT_DESKTOP:-}${DESKTOP_SESSION:-}"
   echo "==> Prüfe GUI für Popup-Tool (gefunden: ${desktop:-<unbekannt>})"
-
-  # Noninteractive APT
   export DEBIAN_FRONTEND=noninteractive
-
   case "$desktop" in
     *KDE*|*Plasma*|*kde*)
       echo "==> Installiere kdialog (KDE/Plasma)"
@@ -70,7 +64,6 @@ if ! has_repo_layout "$REPO_ROOT"; then
     git clone --depth=1 "$REPO_URL" "$TMPROOT"
   fi
   REPO_ROOT="$TMPROOT"
-  # Aufräumen bei Exit
   trap '[[ $CLEANUP -eq 1 ]] && rm -rf "$TMPROOT"' EXIT
 fi
 
@@ -79,46 +72,94 @@ MANIFEST_DIR="/var/lib/imac-linux-wifi-audio"
 MANIFEST_FILE="${MANIFEST_DIR}/manifest.txt"
 
 wifi_ok(){
-  command -v ip >/dev/null 2>&1 && ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi)' && return 0
-  lsmod | grep -q '^brcmfmac'
+  # Interface vorhanden?
+  if command -v ip >/dev/null 2>&1; then
+    ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi)' && return 0
+  fi
+  # Modul geladen?
+  lsmod | grep -q '^brcmfmac' && return 0
+  # dmesg-Hinweis?
+  command -v dmesg >/dev/null 2>&1 && dmesg | grep -qi brcmfmac && return 0
+  return 1
 }
 
 audio_ok(){
-  # 1) Modul geladen? (falls nicht built-in)
   lsmod | grep -q '^snd_hda_codec_cs8409' && return 0
-  # 2) ALSA-Karten zeigen CS8409/Cirrus?
   [[ -r /proc/asound/cards ]] && grep -qiE 'cs8409|cirrus' /proc/asound/cards && return 0
-  # 3) aplay -l listet CS8409?
   command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -qiE 'CS8409|Cirrus' && return 0
-  # 4) dmesg erwähnt CS8409?
   command -v dmesg >/dev/null 2>&1 && dmesg | grep -qi cs8409 && return 0
   return 1
 }
 
 copy_wifi() {
   if wifi_ok; then
-    log "\n✔ WLAN ist bereits aktiv (OOTB) – überspringe Firmware-Installation."
+    log "\n✔ WLAN ist bereits aktiv – überspringe Firmware-Installation."
     return 0
   fi
-  log "\n==> WLAN-Firmware kopieren (b2 + b3)"
+
+  log "\n==> WLAN-Firmware kopieren (BCM4364 b2/b3 inkl. .bin/.txt/.clm_blob/.txcap_blob)"
   install -d /lib/firmware/brcm
-  local cnt=0
   shopt -s nullglob
-  for sub in b2 b3; do
-    for f in "${REPO_ROOT}/broadcom/${sub}"/*; do
+
+  # Variante aus dmesg ableiten (midway=b2, borneo=b3). Fallback: beide
+  local want="both"
+  if dmesg | grep -qi 'apple,midway'; then want="b2"; fi
+  if dmesg | grep -qi 'apple,borneo'; then want="b3"; fi
+
+  local copied=0
+  do_copy_variant(){
+    local var="$1" ; local src="${REPO_ROOT}/broadcom/${var}"
+    [[ -d "$src" ]] || return 0
+    for f in "${src}"/brcmfmac4364*; do
       install -m 0644 "$f" /lib/firmware/brcm/
       echo "/lib/firmware/brcm/$(basename "$f")" >>"${MANIFEST_FILE}"
-      ((cnt++))
+      ((copied++))
     done
-  done
-  log "   → ${cnt} Dateien kopiert. Lade brcmfmac neu (Best effort)."
-  modprobe -r brcmfmac 2>/dev/null || true
-  modprobe brcmfmac || true
+  }
+
+  case "$want" in
+    b2) do_copy_variant b2 ;;
+    b3) do_copy_variant b3 ;;
+    both) do_copy_variant b2; do_copy_variant b3 ;;
+  esac
+
+  # Generik-Symlinks für vorhandene Variante(n)
+  if ls /lib/firmware/brcm/brcmfmac4364b2-pcie.apple,midway.* >/dev/null 2>&1; then
+    ( cd /lib/firmware/brcm
+      ln -sf brcmfmac4364b2-pcie.apple,midway.bin        brcmfmac4364b2-pcie.bin
+      ln -sf brcmfmac4364b2-pcie.apple,midway.txt        brcmfmac4364b2-pcie.txt
+      ln -sf brcmfmac4364b2-pcie.apple,midway.clm_blob   brcmfmac4364b2-pcie.clm_blob
+      ln -sf brcmfmac4364b2-pcie.apple,midway.txcap_blob brcmfmac4364b2-pcie.txcap_blob
+    )
+  fi
+  if ls /lib/firmware/brcm/brcmfmac4364b3-pcie.apple,borneo.* >/dev/null 2>&1; then
+    ( cd /lib/firmware/brcm
+      ln -sf brcmfmac4364b3-pcie.apple,borneo.bin        brcmfmac4364b3-pcie.bin
+      ln -sf brcmfmac4364b3-pcie.apple,borneo.txt        brcmfmac4364b3-pcie.txt
+      ln -sf brcmfmac4364b3-pcie.apple,borneo.clm_blob   brcmfmac4364b3-pcie.clm_blob
+      ln -sf brcmfmac4364b3-pcie.apple,borneo.txcap_blob brcmfmac4364b3-pcie.txcap_blob
+    )
+  fi
+
+  # evtl. Broadcom-STA (wl) entfernen, der brcmfmac blockiert
+  apt-cache policy broadcom-sta-dkms >/dev/null 2>&1 && apt-get purge -y broadcom-sta-dkms bcmwl-kernel-source 2>/dev/null || true
+  modprobe -r wl 2>/dev/null || true
+
+  log "   → ${copied} Dateien aktualisiert. Initramfs/Stack neu laden…"
+  command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u || true
+
+  # WLAN-Stack neu laden
+  modprobe -r brcmfmac brcmutil cfg80211 2>/dev/null || true
+  modprobe cfg80211
+  modprobe brcmutil
+  modprobe brcmfmac
+  rfkill unblock wifi 2>/dev/null || true
+  systemctl restart NetworkManager 2>/dev/null || true
 }
 
 install_audio() {
   if audio_ok; then
-    log "\n✔ Audio (CS8409) ist bereits aktiv (OOTB) – überspringe Installation."
+    log "\n✔ Audio (CS8409) ist bereits aktiv – überspringe Installation."
     return 0
   fi
   log "\n==> Audio (CS8409) aktivieren"
@@ -135,7 +176,6 @@ already_ok() {
 }
 
 setup_service() {
-  # Popup-Tool je nach GUI nachinstallieren (falls keines vorhanden)
   install_popup_tool
   chmod +x "${REPO_ROOT}/kernel_update_service.sh" || true
   bash "${REPO_ROOT}/kernel_update_service.sh"
