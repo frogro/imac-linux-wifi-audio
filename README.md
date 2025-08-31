@@ -1,5 +1,5 @@
 # 🖥️ iMac Linux WiFi + Audio 
-Viele **iMacs sowie MacBooks** laufen super flott mit Linux, aber Sound und WLAN funktionieren nach der Installation nicht sofort. Hier findest du eine **Schritt-für-Schritt-Anleitung**, wie du beides aktivierst. 
+Viele **iMacs** und **MacBooks** laufen super flott mit Linux, aber Sound und WLAN funktionieren nach der Installation nicht sofort. Hier findest du eine **Schritt-für-Schritt-Anleitung**, wie du beides aktivierst. 
 
 In diesem **HowTo** geht es ausschließlich um Geräte mit
 
