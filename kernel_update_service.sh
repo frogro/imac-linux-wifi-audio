@@ -44,10 +44,9 @@ mirror_variant() {
   echo "$n"
 }
 
-# Spiegle b2/b3 ohne zu verlangen, dass alle Dateitypen vorhanden sind
+# Spiegle b2/b3 ohne harte Anforderungen an Dateitypen
 C1=$(mirror_variant "${REPO_ROOT}/broadcom/b2" "$SHARE_FW_B2" || echo 0)
 C2=$(mirror_variant "${REPO_ROOT}/broadcom/b3" "$SHARE_FW_B3" || echo 0)
-# (keine harte Aktion, nur Info)
 echo "FW-Mirror: b2=${C1} Dateien, b3=${C2} Dateien unter ${SHARE_FW_BASE}"
 
 # --- 1) ROOT-Check Script ---
@@ -62,13 +61,13 @@ FLAG_WIFI_NEEDED="${STATE_DIR}/needs_wifi_fix"
 
 log(){ printf "[imac-wifi-audio-check] %s\n" "$*"; }
 
-has_wifi_iface(){
-  command -v ip >/dev/null 2>&1 || return 1
-  ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi)'
-}
-
 wifi_ok(){
-  has_wifi_iface || lsmod | grep -q '^brcmfmac'
+  # OK nur, wenn mindestens EIN echtes Wireless-Interface existiert
+  local n
+  for n in /sys/class/net/*; do
+    [[ -d "${n}/wireless" ]] && return 0
+  done
+  return 1
 }
 
 audio_ok(){
@@ -121,7 +120,7 @@ SHARE_FW_B3="$SHARE_FW_B3"
 usage(){ echo "Usage: \$0 [--wifi] [--audio]"; }
 
 copy_fw_variant(){
-  # copy_fw_variant <srcdir>  (copies all brcmfmac4364* files if src exists)
+  # copy_fw_variant <srcdir>
   local src="\$1"
   [[ -d "\$src" ]] || return 0
   shopt -s nullglob
@@ -145,7 +144,7 @@ set_symlinks_if_present(){
   local src_txcap="\${base}.\${apple}.txcap_blob"
 
   [[ -f "\$src_bin"  ]] && ln -sf "\$src_bin"   "\${base}.bin"
-  [[ -f "\$src_txt"  ]] && ln -sf "\$src_txt"   "\${base}.txt"   || echo "⚠️  Hinweis: NVRAM (.txt) für \${base} fehlt – Treiber lädt oft trotzdem, ggf. NVRAM später ergänzen."
+  [[ -f "\$src_txt"  ]] && ln -sf "\$src_txt"   "\${base}.txt"   || echo "⚠️  Hinweis: NVRAM (.txt) für \${base} fehlt – Treiber lädt oft trotzdem; ggf. später ergänzen."
   [[ -f "\$src_clm"  ]] && ln -sf "\$src_clm"   "\${base}.clm_blob"
   [[ -f "\$src_txcap" ]] && ln -sf "\$src_txcap" "\${base}.txcap_blob"
   popd >/dev/null || true
