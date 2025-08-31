@@ -3,128 +3,113 @@ set -euo pipefail
 
 ### === Einstellungen ===
 REPO_URL="https://github.com/frogro/imac-linux-wifi-audio.git"
-REPO_BRANCH="main"   # ggf. anpassen
+REPO_BRANCH="main"
 ### =====================
 
 bold(){ printf "\033[1m%s\033[0m\n" "$*"; }
-log(){ echo -e "$*"; }
-need_root(){ if [ "${EUID:-$(id -u)}" -ne 0 ]; then echo "Bitte mit sudo ausführen." >&2; exit 1; fi; }
+say(){ echo -e "$*"; }
+need_root(){ if [[ $EUID -ne 0 ]]; then echo "Bitte mit sudo ausführen." >&2; exit 1; fi }
 
-# Prüft, ob erwartete Struktur unter $1 vorhanden ist
+# Strukturprüfung fürs Repo
 has_repo_layout() {
-  base="$1"
-  [ -f "$base/cirruslogic/install_cs8409_manual.sh" ] \
-  && [ -f "$base/cirruslogic/extract_from_kernelpkg.sh" ] \
-  && [ -d "$base/broadcom" ]
+  local base="$1"
+  [[ -f "$base/cirruslogic/install_cs8409_manual.sh" ]] \
+  && [[ -f "$base/cirruslogic/extract_from_kernelpkg.sh" ]] \
+  && [[ -d "$base/broadcom" ]]
 }
 
-# Popup-Tool (zenity/kdialog) passend zur Desktop-Umgebung installieren (falls keins vorhanden)
+# Popup-Tool nach Desktop ermitteln/ggf. installieren
 install_popup_tool() {
-  if command -v zenity >/dev/null 2>&1 || command -v kdialog >/dev/null 2>&1; then
-    return
-  fi
-  desktop="${XDG_CURRENT_DESKTOP:-}${DESKTOP_SESSION:-}"
-  echo "==> Prüfe GUI für Popup-Tool (gefunden: ${desktop:-<unbekannt>})"
+  if command -v zenity >/dev/null 2>&1 || command -v kdialog >/dev/null 2>&1; then return; fi
+  local desktop="${XDG_CURRENT_DESKTOP:-}${DESKTOP_SESSION:-}"
   export DEBIAN_FRONTEND=noninteractive
   case "$desktop" in
-    *KDE*|*Plasma*|*kde*)
-      echo "==> Installiere kdialog (KDE/Plasma)"
-      apt-get update -y
-      apt-get install -y kdialog || echo "⚠️  KDialog konnte nicht installiert werden. Fallback: Terminal-Prompts."
-      ;;
-    *GNOME*|*X-Cinnamon*|*MATE*|*XFCE*|*LXDE*|*LXQt*|*Unity*|*Budgie*|*Deepin*|*Pantheon*)
-      echo "==> Installiere zenity (GTK-Desktop)"
-      apt-get update -y
-      apt-get install -y zenity || echo "⚠️  Zenity konnte nicht installiert werden. Fallback: Terminal-Prompts."
-      ;;
-    *)
-      echo "⚠️  Keine bekannte Desktop-Umgebung erkannt. Bitte installiere manuell 'zenity' oder 'kdialog', sonst gibt es nur Terminal-Prompts."
-      ;;
+    *KDE*|*Plasma*|*kde*) apt-get update -y && apt-get install -y kdialog || true ;;
+    *)                    apt-get update -y && apt-get install -y zenity  || true ;;
   esac
 }
 
-# Versuche, echtes Repo-Root zu bestimmen (Skriptverzeichnis)
+# Pfade
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
 TMPROOT=""
 CLEANUP=0
 
-# Wenn die Struktur neben install.sh fehlt → Repo nach /tmp klonen
-prepare_repo() {
-  if has_repo_layout "$REPO_ROOT"; then
-    return
-  fi
-  if ! command -v git >/dev/null 2>&1; then
-    echo "❌ Git nicht gefunden und Repo-Struktur fehlt. Bitte git installieren (apt install git) oder vollständiges Repo bereitstellen."
-    exit 2
-  fi
+# Klonen, falls Installer nicht im Repo liegt
+if ! has_repo_layout "$REPO_ROOT"; then
+  command -v git >/dev/null 2>&1 || { echo "❌ Git fehlt. apt install git"; exit 2; }
   TMPROOT="$(mktemp -d /tmp/imac-linux-wifi-audio.XXXXXX)"
   CLEANUP=1
   bold "==> Klone Repo nach: $TMPROOT"
-  if [ -n "$REPO_BRANCH" ]; then
+  if [[ -n "$REPO_BRANCH" ]]; then
     git clone --depth=1 --branch "$REPO_BRANCH" "$REPO_URL" "$TMPROOT"
   else
     git clone --depth=1 "$REPO_URL" "$TMPROOT"
   fi
   REPO_ROOT="$TMPROOT"
-  trap '[ "$CLEANUP" = "1" ] && rm -rf "$TMPROOT"' EXIT
-}
+  trap '[[ $CLEANUP -eq 1 ]] && rm -rf "$TMPROOT"' EXIT
+fi
 
-# Ab hier: normaler Installer-Flow, arbeitet aus $REPO_ROOT
-MANIFEST_DIR="/var/lib/imac-linux-wifi-audio"
-MANIFEST_FILE="${MANIFEST_DIR}/manifest.txt"
+# Status-/Manifest
+STATE_DIR="/var/lib/imac-linux-wifi-audio"
+MANIFEST_FILE="${STATE_DIR}/manifest.txt"
+STATUS_JSON="${STATE_DIR}/status.json"
+FLAG_AUDIO_NEEDS_FIX="${STATE_DIR}/needs_audio_fix"
+FLAG_WIFI_NEEDS_FIX="${STATE_DIR}/needs_wifi_fix"
+FLAG_REBOOT_SUGGESTED="${STATE_DIR}/reboot_suggested"
+FLAG_POSTREBOOT_CHECK="${STATE_DIR}/postreboot_check"
+
+mkdir -p "$STATE_DIR"; touch "$MANIFEST_FILE"
 
 wifi_ok(){
   # Interface vorhanden?
-  if command -v ip >/dev/null 2>&1; then
-    if ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi)'; then
-      return 0
-    fi
-  fi
+  if command -v ip >/dev/null 2>&1; then ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi|wlp)'; [[ $? -eq 0 ]] && return 0; fi
   # Modul geladen?
-  if lsmod | grep -q '^brcmfmac'; then
-    return 0
-  fi
+  lsmod | grep -q '^brcmfmac' && return 0
   # dmesg-Hinweis?
-  if command -v dmesg >/dev/null 2>&1 && dmesg | grep -qi brcmfmac; then
-    return 0
-  fi
+  command -v dmesg >/dev/null 2>&1 && dmesg | grep -qi brcmfmac && return 0
   return 1
 }
 
 audio_ok(){
-  lsmod | grep -q '^snd_hda_codec_cs8409' && return 0
-  [ -r /proc/asound/cards ] && grep -qiE 'cs8409|cirrus' /proc/asound/cards && return 0
+  # Modul da?
+  if lsmod | grep -q '^snd_hda_codec_cs8409'; then
+    # erkennbare CS8409 / Cirrus-Karte?
+    [[ -r /proc/asound/cards ]] && grep -qiE 'CS8409|Cirrus' /proc/asound/cards && return 0
+  fi
+  # Fallback: aplay -l enthält CS8409/Cirrus?
   command -v aplay >/dev/null 2>&1 && aplay -l 2>/dev/null | grep -qiE 'CS8409|Cirrus' && return 0
-  command -v dmesg >/dev/null 2>&1 && dmesg | grep -qi cs8409 && return 0
+  # Noch im dmesg sichtbar?
+  command -v dmesg >/dev/null 2>&1 && dmesg | grep -qiE 'cs8409|cirrus' && return 0
   return 1
 }
 
-set_symlinks_if_present() {
-  # set_symlinks_if_present <base> <apple-variant>
-  # z. B.: set_symlinks_if_present brcmfmac4364b2-pcie "apple,midway"
-  local base="$1"
-  local apple="$2"
-  local dir="/lib/firmware/brcm"
-  cd "$dir" || return 0
-  local src_bin="${base}.${apple}.bin"
-  local src_txt="${base}.${apple}.txt"
-  local src_clm="${base}.${apple}.clm_blob"
-  local src_txcap="${base}.${apple}.txcap_blob"
-
-  if [ -f "$src_bin" ]; then ln -sf "$src_bin"   "${base}.bin"; fi
-  if [ -f "$src_txt" ]; then ln -sf "$src_txt"   "${base}.txt"; else echo "Hinweis: NVRAM (.txt) für ${base} fehlt."; fi
-  if [ -f "$src_clm" ]; then ln -sf "$src_clm"   "${base}.clm_blob"; fi
-  if [ -f "$src_txcap" ]; then ln -sf "$src_txcap" "${base}.txcap_blob"; fi
+# Blacklist-Wächter für CS8409
+unblacklist_cs8409(){
+  local changed=0
+  shopt -s nullglob
+  for f in /etc/modprobe.d/*cs8409*.conf; do
+    if grep -qiE '^\s*blacklist\s+snd_hda_codec_cs8409' "$f"; then
+      say "⚠️  Entferne Blacklist in: $f"
+      rm -f "$f"
+      changed=1
+    fi
+  done
+  if (( changed )); then
+    say "==> update-initramfs (wegen Blacklist-Änderung)…"
+    update-initramfs -u || true
+    touch "$FLAG_REBOOT_SUGGESTED" "$FLAG_POSTREBOOT_CHECK"
+  fi
+  return 0
 }
 
 copy_wifi() {
   if wifi_ok; then
-    log "\n✔ WLAN ist bereits aktiv – überspringe Firmware-Installation."
+    say "\n✔ WLAN ist bereits aktiv – überspringe Firmware-Installation."
     return 0
   fi
 
-  log "\n==> WLAN-Firmware kopieren (BCM4364 b2/b3 inkl. .bin/.txt/.clm_blob/.txcap_blob)"
+  say "\n==> WLAN-Firmware kopieren (BCM4364 b2/b3 inkl. .bin/.txt/.clm_blob/.txcap_blob)"
   install -d /lib/firmware/brcm
   shopt -s nullglob
 
@@ -136,11 +121,11 @@ copy_wifi() {
   local copied=0
   do_copy_variant(){
     local var="$1" ; local src="${REPO_ROOT}/broadcom/${var}"
-    [ -d "$src" ] || return 0
+    [[ -d "$src" ]] || return 0
     for f in "${src}"/brcmfmac4364*; do
       install -m 0644 "$f" /lib/firmware/brcm/
       echo "/lib/firmware/brcm/$(basename "$f")" >>"${MANIFEST_FILE}"
-      copied=$((copied+1))
+      ((copied++))
     done
   }
 
@@ -150,80 +135,87 @@ copy_wifi() {
     both) do_copy_variant b2; do_copy_variant b3 ;;
   esac
 
-  # Generik-Symlinks für vorhandene Variante(n)
+  # Generische Symlinks
   if ls /lib/firmware/brcm/brcmfmac4364b2-pcie.apple,midway.* >/dev/null 2>&1; then
-    ( cd /lib/firmware/brcm || exit 0
-      [ -f brcmfmac4364b2-pcie.apple,midway.bin       ] && ln -sf brcmfmac4364b2-pcie.apple,midway.bin        brcmfmac4364b2-pcie.bin
-      if [ -f brcmfmac4364b2-pcie.apple,midway.txt    ]; then
-        ln -sf brcmfmac4364b2-pcie.apple,midway.txt   brcmfmac4364b2-pcie.txt
-      else
-        echo "Hinweis: NVRAM (.txt) für 4364b2 fehlt."
-      fi
-      [ -f brcmfmac4364b2-pcie.apple,midway.clm_blob  ] && ln -sf brcmfmac4364b2-pcie.apple,midway.clm_blob   brcmfmac4364b2-pcie.clm_blob
-      [ -f brcmfmac4364b2-pcie.apple,midway.txcap_blob] && ln -sf brcmfmac4364b2-pcie.apple,midway.txcap_blob brcmfmac4364b2-pcie.txcap_blob
+    ( cd /lib/firmware/brcm
+      ln -sf brcmfmac4364b2-pcie.apple,midway.bin        brcmfmac4364b2-pcie.bin
+      ln -sf brcmfmac4364b2-pcie.apple,midway.txt        brcmfmac4364b2-pcie.txt
+      ln -sf brcmfmac4364b2-pcie.apple,midway.clm_blob   brcmfmac4364b2-pcie.clm_blob
+      ln -sf brcmfmac4364b2-pcie.apple,midway.txcap_blob brcmfmac4364b2-pcie.txcap_blob
     )
   fi
   if ls /lib/firmware/brcm/brcmfmac4364b3-pcie.apple,borneo.* >/dev/null 2>&1; then
-    ( cd /lib/firmware/brcm || exit 0
-      [ -f brcmfmac4364b3-pcie.apple,borneo.bin       ] && ln -sf brcmfmac4364b3-pcie.apple,borneo.bin        brcmfmac4364b3-pcie.bin
-      if [ -f brcmfmac4364b3-pcie.apple,borneo.txt    ]; then
-        ln -sf brcmfmac4364b3-pcie.apple,borneo.txt   brcmfmac4364b3-pcie.txt
-      else
-        echo "Hinweis: NVRAM (.txt) für 4364b3 fehlt."
-      fi
-      [ -f brcmfmac4364b3-pcie.apple,borneo.clm_blob  ] && ln -sf brcmfmac4364b3-pcie.apple,borneo.clm_blob   brcmfmac4364b3-pcie.clm_blob
-      [ -f brcmfmac4364b3-pcie.apple,borneo.txcap_blob] && ln -sf brcmfmac4364b3-pcie.apple,borneo.txcap_blob brcmfmac4364b3-pcie.txcap_blob
+    ( cd /lib/firmware/brcm
+      ln -sf brcmfmac4364b3-pcie.apple,borneo.bin        brcmfmac4364b3-pcie.bin
+      ln -sf brcmfmac4364b3-pcie.apple,borneo.txt        brcmfmac4364b3-pcie.txt
+      ln -sf brcmfmac4364b3-pcie.apple,borneo.clm_blob   brcmfmac4364b3-pcie.clm_blob
+      ln -sf brcmfmac4364b3-pcie.apple,borneo.txcap_blob brcmfmac4364b3-pcie.txcap_blob
     )
   fi
 
-  # evtl. Broadcom-STA (wl) entfernen, der brcmfmac blockiert
-  if apt-cache policy broadcom-sta-dkms >/dev/null 2>&1; then
-    apt-get purge -y broadcom-sta-dkms bcmwl-kernel-source 2>/dev/null || true
-  fi
+  # STA-Treiber entfernen & Stack neu laden
+  apt-get purge -y broadcom-sta-dkms bcmwl-kernel-source 2>/dev/null || true
   modprobe -r wl 2>/dev/null || true
 
-  log "   → ${copied} Dateien aktualisiert. Initramfs/Stack neu laden…"
+  say "   → ${copied} Dateien aktualisiert. Initramfs/Stack neu laden…"
   command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u || true
 
-  # WLAN-Stack neu laden & NM sicher starten
+  # WLAN-Stack neu laden
   modprobe -r brcmfmac brcmutil cfg80211 2>/dev/null || true
-  sleep 1
-  modprobe cfg80211 || true
-  modprobe brcmutil  || true
-  modprobe brcmfmac  || true
+  modprobe cfg80211
+  modprobe brcmutil 2>/dev/null || true
+  modprobe brcmfmac
   rfkill unblock wifi 2>/dev/null || true
-  systemctl enable --now NetworkManager 2>/dev/null || true
-  nmcli radio wifi on 2>/dev/null || true
+  systemctl restart NetworkManager 2>/dev/null || true
 }
 
 install_audio() {
+  # 1) Blacklist-Wächter
+  unblacklist_cs8409
+
   if audio_ok; then
-    log "\n✔ Audio (CS8409) ist bereits aktiv – überspringe Installation."
+    say "\n✔ Audio (CS8409) ist bereits aktiv – überspringe Installation."
     return 0
   fi
-  log "\n==> Audio (CS8409) aktivieren"
-  chmod +x "${REPO_ROOT}/cirruslogic/"*.sh || true
 
-  # Falls Modul bereits im Kernel vorhanden ist, nur Autoload + Init
-  if [ -e "/lib/modules/$(uname -r)/kernel/sound/pci/hda/snd-hda-codec-cs8409.ko" ] || lsmod | grep -q '^snd_hda_codec_cs8409'; then
-    echo "==> Modul vorhanden/ladbar – aktiviere Autoload"
-    echo "snd_hda_codec_cs8409" > /etc/modules-load.d/snd_hda_codec_cs8409.conf
-    depmod -a || true
-  else
-    # manueller Installer
+  say "\n==> Audio (CS8409) aktivieren"
+  # Autoload-Datei sicherstellen
+  echo "snd_hda_codec_cs8409" >/etc/modules-load.d/snd_hda_codec_cs8409.conf
+
+  # Wenn Kernelmodul im Baum vorhanden ist: versuchen zu laden
+  if modprobe -n snd_hda_codec_cs8409 2>/dev/null; then
+    say "==> Modul vorhanden/ladbar – aktiviere Autoload"
+    modprobe snd_hda_codec_cs8409 || true
+  fi
+
+  # Falls cirruslogic-Skripte vorhanden: ausführen (OHNE DKMS)
+  chmod +x "${REPO_ROOT}/cirruslogic/"*.sh 2>/dev/null || true
+  if [[ -x "${REPO_ROOT}/cirruslogic/extract_from_kernelpkg.sh" ]]; then
+    bash "${REPO_ROOT}/cirruslogic/extract_from_kernelpkg.sh" || true
+  fi
+  if [[ -x "${REPO_ROOT}/cirruslogic/install_cs8409_manual.sh" ]]; then
     bash "${REPO_ROOT}/cirruslogic/install_cs8409_manual.sh" --autoload || true
   fi
 
-  # Kurz-Init (wird beim ersten echten Start oft erst nach Reboot wirklich aktiv)
+  # Kurzer Stack-Refresh
   alsactl init >/dev/null 2>&1 || true
+
+  # Erfolgskontrolle
+  if audio_ok; then
+    say "✅ CS8409 Setup fertig."
+    rm -f "$FLAG_AUDIO_NEEDS_FIX" "$FLAG_POSTREBOOT_CHECK" 2>/dev/null || true
+  else
+    # Kein sofortiger Erfolg: Nachlauf über Reboot/Popup
+    say "ℹ️  Audio noch nicht verifizierbar – wahrscheinlich benötigt der HDA-Bus einen Neustart."
+    touch "$FLAG_POSTREBOOT_CHECK" "$FLAG_REBOOT_SUGGESTED" "$FLAG_AUDIO_NEEDS_FIX"
+  fi
 }
 
 already_ok() {
-  ok_wifi=0
-  ok_audio=0
-  if wifi_ok; then ok_wifi=1; fi
-  if audio_ok; then ok_audio=1; fi
-  echo "${ok_wifi}:${ok_audio}"
+  local ok_wifi=0 ok_audio=0
+  wifi_ok && ok_wifi=1
+  audio_ok && ok_audio=1
+  echo "$ok_wifi:$ok_audio"
 }
 
 setup_service() {
@@ -232,15 +224,8 @@ setup_service() {
   bash "${REPO_ROOT}/kernel_update_service.sh"
 }
 
-yesno(){
-  [ "${1:-0}" = "1" ] && printf "Ja" || printf "Nein"
-}
-
 main() {
   need_root
-  prepare_repo
-  mkdir -p "${MANIFEST_DIR}"
-  touch "${MANIFEST_FILE}"
 
   bold "== iMac Linux WiFi + Audio Installer =="
   echo "1) WLAN installieren"
@@ -254,28 +239,30 @@ main() {
     1) copy_wifi ;;
     2) install_audio ;;
     3) copy_wifi; install_audio ;;
-    4) setup_service; exit 0 ;;
+    4) setup_service; echo "✅ Root-Check, pkexec-Helper, User-Notifier & persistenter FW-Mirror eingerichtet (non-blocking Setup).";;
     *) echo "Ungültige Auswahl"; exit 3 ;;
   esac
 
+  # Post-Schritt: optional Service dazu
   printf "\nService zur Kernel-Update-Prüfung einrichten? [y/N]: "
   read -r yn
-  case "$yn" in
-    y|Y) setup_service ;;
-  esac
+  if [[ "${yn,,}" == "y" ]]; then
+    setup_service
+  fi
 
-  # kurze Re-Initialisierung
-  sleep 1
-  if command -v alsactl >/dev/null 2>&1; then alsactl init >/dev/null 2>&1 || true; fi
-
-  st="$(already_ok)"
-  w="${st%%:*}"
-  a="${st##*:}"
+  # Zusammenfassung
+  local st
+  st=$(already_ok)
   echo -e "\n== Zusammenfassung =="
-  echo "WLAN aktiv:  $( yesno "$w" )"
-  echo "Audio aktiv: $( yesno "$a" )"
+  echo "WLAN aktiv:  $( [[ ${st%%:*} -eq 1 ]] && echo Ja || echo Nein )"
+  echo "Audio aktiv: $( [[ ${st##*:} -eq 1 ]] && echo Ja || echo Nein )"
   echo "Manifest: ${MANIFEST_FILE}"
-  echo -e "\nFertig. Ein Neustart wird empfohlen."
+
+  if [[ -f "$FLAG_REBOOT_SUGGESTED" ]]; then
+    echo -e "\n⚠️  Ein Neustart wird empfohlen, damit CS8409 sauber initialisiert. Nach dem Reboot prüft der User-Notifier erneut."
+  else
+    echo -e "\nFertig."
+  fi
 }
 
 main "$@"
