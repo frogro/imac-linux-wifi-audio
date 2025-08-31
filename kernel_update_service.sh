@@ -72,8 +72,10 @@ wifi_ok(){
 }
 
 audio_ok(){
-  lsmod | grep -q '^snd_hda_codec_cs8409' && return 0
-  [[ -r /proc/asound/cards ]] && egrep -qi 'cs8409|cirrus' /proc/asound/cards
+  # OK, wenn CS8409-Modul geladen ODER ALSA-Karte sichtbar
+  if lsmod | grep -q "^snd_hda_codec_cs8409"; then return 0; fi
+  if [[ -r /proc/asound/cards ]] && grep -qiE "cs8409|cirrus" /proc/asound/cards; then return 0; fi
+  return 1
 }
 
 cur_kernel="$(uname -r)"
