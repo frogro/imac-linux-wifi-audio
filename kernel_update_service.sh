@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # Installiert/aktualisiert:
-#  - Root-Check + Timer:        /usr/local/bin/imac-wifi-audio-check.sh  (+ .service/.timer)
-#  - Root-Fix-Helper:           /usr/local/sbin/imac-wifi-audio-fix.sh    (pkexec-fähig)
-#  - Polkit-Regel:              /usr/share/polkit-1/actions/com.frogro.imacwifi.policy
-#  - User-Notifier (+timer):    $HOME/.config/systemd/user/imac-wifi-audio-notify.{service,timer}
-#  - Persistenter FW-Mirror:    /usr/local/share/imac-linux-wifi-audio/broadcom/{b2,b3}
+#  - Root-Check + Timer:     /usr/local/bin/imac-wifi-audio-check.sh
+#  - Root-Fix-Helper:        /usr/local/sbin/imac-wifi-audio-fix.sh
+#  - Polkit-Regel:           /usr/share/polkit-1/actions/com.frogro.imacwifi.policy
+#  - User-Notifier (+timer): $HOME/.config/systemd/user/imac-wifi-audio-notify.*
+#  - FW-Mirror (persistent): /usr/local/share/imac-linux-wifi-audio/broadcom/{b2,b3}
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 STATE_DIR="/var/lib/imac-linux-wifi-audio"
@@ -31,21 +31,30 @@ need_root
 
 mkdir -p "$STATE_DIR" "$SHARE_FW_B2" "$SHARE_FW_B3"
 
-# --- Hilfsfunktion: sichere --user systemctl Aufrufe (ohne Hänger) ---
-userctl(){
-  # userctl <username> -- systemctl --user <args...>
-  local user="$1"; shift
-  [[ "$1" == "--" ]] && shift || true
-  local uid
-  uid="$(id -u "$user")"
-  # Nur ausführen, wenn User-Session aktiv ist
-  if loginctl show-user "$user" >/dev/null 2>&1; then
-    local xrd="/run/user/$uid"
-    local dbus="unix:path=/run/user/$uid/bus"
-    sudo -u "$user" env XDG_RUNTIME_DIR="$xrd" DBUS_SESSION_BUS_ADDRESS="$dbus" systemctl --user "$@"
+# --- kleine Helfer fürs User-Systemd (robust mit/ohne DBus-Env) ---
+get_real_user(){
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    echo "$SUDO_USER"
   else
-    echo "⚠️  Keine aktive Usersession für $user gefunden – überspringe: systemctl --user $*" >&2
-    return 0
+    # Fallback: letzter eingeloggter non-root User auf der Sitzungs-tty
+    logname 2>/dev/null || id -un
+  fi
+}
+user_has_bus(){
+  local u="$1" uid; uid="$(id -u "$u")"
+  [[ -S "/run/user/${uid}/bus" ]]
+}
+run_user(){
+  local u="$1"; shift
+  local uid; uid="$(id -u "$u")"
+  if user_has_bus "$u"; then
+    XDG_RUNTIME_DIR="/run/user/${uid}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+    sudo -u "$u" env XDG_RUNTIME_DIR="/run/user/${uid}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" "$@"
+  else
+    # Linger einschalten, damit --user units ohne aktive Session funktionieren
+    loginctl enable-linger "$u" >/dev/null 2>&1 || true
+    sudo -u "$u" "$@"
   fi
 }
 
@@ -62,11 +71,11 @@ mirror_variant() {
   echo "$n"
 }
 
-C1=$(mirror_variant "${REPO_ROOT}/broadcom/b2" "$SHARE_FW_B2" || echo 0)
-C2=$(mirror_variant "${REPO_ROOT}/broadcom/b3" "$SHARE_FW_B3" || echo 0)
+C1=$(mirror_variant "${REPO_ROOT}/broadcom/b2" "$SHARE_FW_B2")
+C2=$(mirror_variant "${REPO_ROOT}/broadcom/b3" "$SHARE_FW_B3")
 echo "FW-Mirror: b2=${C1} Dateien, b3=${C2} Dateien unter ${SHARE_FW_BASE}"
 
-# --- 1) ROOT-Check Script (schreibt status.json + Flags) ---
+# --- 1) ROOT-Check Script ---
 cat >"$CHECK_BIN" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -80,26 +89,16 @@ log(){ printf "[imac-wifi-audio-check] %s\n" "$*"; }
 
 has_wifi_iface(){
   command -v ip >/dev/null 2>&1 || return 1
-  ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi|wlp|wlo)'
+  ip -o link show | awk -F': ' '{print $2}' | egrep -q '^(wlan|wl|wifi|wlp)'
 }
 
 wifi_ok(){
-  # Interface ODER Modul als Indiz
-  has_wifi_iface && return 0
-  lsmod | grep -q '^brcmfmac' && return 0
-  # Firmware-Hinweise
-  dmesg | grep -qi 'brcmfmac' && return 0
-  return 1
+  has_wifi_iface || lsmod | grep -q '^brcmfmac'
 }
 
+# Audio als „ok“, wenn CS8409-Modul geladen (robusteste Heuristik)
 audio_ok(){
-  # Cirrus 8409 geladen?
-  lsmod | grep -q '^snd_hda_codec_cs8409' && return 0
-  # Wird der Cirrus Codec sichtbar?
-  [[ -r /proc/asound/cards ]] && grep -qiE 'CS8409|Cirrus' /proc/asound/cards && return 0
-  # dmesg-Spur?
-  dmesg | grep -qiE 'cs8409|cirrus' && return 0
-  return 1
+  lsmod | grep -q '^snd_hda_codec_cs8409'
 }
 
 cur_kernel="$(uname -r)"
@@ -112,8 +111,8 @@ audio_ok && ok_audio=1
 mkdir -p "$STATE_DIR"
 printf '{
   "kernel": "%s",
-  "wifi_ok": %d,
-  "audio_ok": %d,
+  "wifi_ok": %s,
+  "audio_ok": %s,
   "checked_at": "%s"
 }
 ' "$cur_kernel" "$ok_wifi" "$ok_audio" "$(date -Iseconds)" > "$STATUS_JSON"
@@ -131,133 +130,160 @@ exit 0
 EOF
 chmod 0755 "$CHECK_BIN"
 
-# --- 2) FIX-Helper (WiFi & Audio) ---
-cat >"$FIX_BIN" <<EOF
+# --- 2) FIX-Helper (WiFi + Audio mit „Schneller Heilung A/B“) ---
+cat >"$FIX_BIN" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-REPO_ROOT="$REPO_ROOT"
-STATE_DIR="$STATE_DIR"
-FLAG_AUDIO_NEEDED="$FLAG_AUDIO_NEEDED"
-FLAG_WIFI_NEEDED="$FLAG_WIFI_NEEDED"
-SHARE_FW_BASE="$SHARE_FW_BASE"
-SHARE_FW_B2="$SHARE_FW_B2"
-SHARE_FW_B3="$SHARE_FW_B3"
 
-usage(){ echo "Usage: \$0 [--wifi] [--audio] [--verify-only]"; }
+STATE_DIR="/var/lib/imac-linux-wifi-audio"
+FLAG_AUDIO_NEEDED="${STATE_DIR}/needs_audio_fix"
+FLAG_WIFI_NEEDED="${STATE_DIR}/needs_wifi_fix"
+
+REPO_ROOT="/usr/local/share/imac-linux-wifi-audio/__norepo__" # nicht benötigt, FW kommt aus /lib oder SHARE
+SHARE_FW_BASE="/usr/local/share/imac-linux-wifi-audio/broadcom"
+SHARE_FW_B2="${SHARE_FW_BASE}/b2"
+SHARE_FW_B3="${SHARE_FW_BASE}/b3"
+
+usage(){ echo "Usage: $0 [--wifi] [--audio]"; }
 
 copy_fw_variant(){
-  local src="\$1"
-  [[ -d "\$src" ]] || { echo 0; return 0; }
+  local src="$1"
+  [[ -d "$src" ]] || { echo 0; return 0; }
   shopt -s nullglob
   local k=0
-  for f in "\$src"/brcmfmac4364*; do
-    install -m 0644 "\$f" /lib/firmware/brcm/
+  for f in "$src"/brcmfmac4364*; do
+    install -m 0644 "$f" /lib/firmware/brcm/
     ((k++))
   done
-  echo "\$k"
+  echo "$k"
 }
 
 set_symlinks_if_present(){
-  local base="\$1" ; local apple="\$2"
-  local dir="/lib/firmware/brcm"
-  pushd "\$dir" >/dev/null || return 0
-  local src_bin="\${base}.\${apple}.bin"
-  local src_txt="\${base}.\${apple}.txt"
-  local src_clm="\${base}.\${apple}.clm_blob"
-  local src_txcap="\${base}.\${apple}.txcap_blob"
-
-  [[ -f "\$src_bin"  ]] && ln -sf "\$src_bin"   "\${base}.bin"
-  [[ -f "\$src_txt"  ]] && ln -sf "\$src_txt"   "\${base}.txt"   || echo "⚠️  Hinweis: NVRAM (.txt) fehlt – Treiber lädt oft trotzdem, ggf. NVRAM später ergänzen."
-  [[ -f "\$src_clm"  ]] && ln -sf "\$src_clm"   "\${base}.clm_blob"
-  [[ -f "\$src_txcap" ]] && ln -sf "\$src_txcap" "\${base}.txcap_blob"
+  local base="$1" apple="$2" dir="/lib/firmware/brcm"
+  pushd "$dir" >/dev/null || return 0
+  [[ -f "${base}.${apple}.bin"      ]] && ln -sf "${base}.${apple}.bin"      "${base}.bin"
+  [[ -f "${base}.${apple}.txt"      ]] && ln -sf "${base}.${apple}.txt"      "${base}.txt"
+  [[ -f "${base}.${apple}.clm_blob" ]] && ln -sf "${base}.${apple}.clm_blob" "${base}.clm_blob"
+  [[ -f "${base}.${apple}.txcap_blob" ]] && ln -sf "${base}.${apple}.txcap_blob" "${base}.txcap_blob"
   popd >/dev/null || true
 }
 
 fix_wifi(){
   echo "==> (WiFi) Firmware aktualisieren & Stack neu laden"
   install -d /lib/firmware/brcm
-
   local c1 c2
-  c1=\$(copy_fw_variant "$SHARE_FW_B2" || echo 0)
-  c2=\$(copy_fw_variant "$SHARE_FW_B3" || echo 0)
-  if [[ "\$c1" -eq 0 && "\$c2" -eq 0 ]]; then
-    c1=\$(copy_fw_variant "\$REPO_ROOT/broadcom/b2" || echo 0)
-    c2=\$(copy_fw_variant "\$REPO_ROOT/broadcom/b3" || echo 0)
-  fi
-  echo "   → Dateien kopiert: b2=\$c1, b3=\$c2"
+  c1=$(copy_fw_variant "$SHARE_FW_B2" || echo 0)
+  c2=$(copy_fw_variant "$SHARE_FW_B3" || echo 0)
+  echo "   → Dateien kopiert: b2=${c1}, b3=${c2}"
 
   set_symlinks_if_present "brcmfmac4364b2-pcie" "apple,midway"
   set_symlinks_if_present "brcmfmac4364b3-pcie" "apple,borneo"
 
-  # Broadcom-STA Reste entfernen/blockaden lösen
-  modprobe -r wl 2>/dev/null || true
+  # stabile P2P-Option
+  echo "options brcmfmac p2pon=0" >/etc/modprobe.d/brcmfmac.conf
 
-  # Stack neu laden + NM reaktivieren
+  # Stack neu
   modprobe -r brcmfmac brcmutil cfg80211 2>/dev/null || true
   modprobe cfg80211
-  modprobe brcmutil 2>/dev/null || true
   modprobe brcmfmac
   rfkill unblock wifi 2>/dev/null || true
   systemctl restart NetworkManager 2>/dev/null || true
 
   if lsmod | grep -q '^brcmfmac'; then
-    echo "✅ WLAN-Modul aktiv."
-    rm -f "\$FLAG_WIFI_NEEDED" 2>/dev/null || true
+    echo "✅ WLAN Modul aktiv."
+    rm -f "$FLAG_WIFI_NEEDED" 2>/dev/null || true
   else
     echo "⚠️  WLAN weiterhin nicht aktiv. Prüfe dmesg."
   fi
 }
 
-fix_audio(){
-  echo "==> (Audio) HDA-Stack sauber neu initialisieren (CS8409)"
-  # 1) Blacklist sicher entfernen (falls vorhanden) + initramfs refresh
-  rm -f /etc/modprobe.d/blacklist-cs8409.conf 2>/dev/null || true
-  if command -v update-initramfs >/dev/null 2>&1; then
+# -------------------- Schnelle Heilung A: Kernel/ALSA --------------------
+audio_quick_heal_kernel(){
+  echo "==> (Audio/A) Kernel/ALSA-Heilung"
+  # evtl. Blacklist entfernen + initramfs aktualisieren
+  if [[ -f /etc/modprobe.d/blacklist-cs8409.conf ]]; then
+    rm -f /etc/modprobe.d/blacklist-cs8409.conf
     update-initramfs -u || true
   fi
 
-  # 2) Autoload sicherstellen
-  echo snd_hda_codec_cs8409 > /etc/modules-load.d/snd_hda_codec_cs8409.conf
+  # Autoload sicherstellen
+  echo "snd_hda_codec_cs8409" >/etc/modules-load.d/snd_hda_codec_cs8409.conf
 
-  # 3) Kernelmodule frisch binden
+  # HDA-Stack sauber neu laden
   modprobe -r snd_hda_codec_cs8409 2>/dev/null || true
   modprobe -r snd_hda_intel 2>/dev/null || true
   modprobe snd_hda_intel
   modprobe snd_hda_codec_cs8409
 
-  # 4) ALSA neu initialisieren
-  if command -v alsactl >/dev/null 2>&1; then
-    alsactl init || true
-  fi
+  # ALSA neu initialisieren
+  command -v alsactl >/dev/null 2>&1 && alsactl init || true
+}
 
-  # 5) Erfolg prüfen (root-seitig)
+# -------------------- Schnelle Heilung B: Mixer & PipeWire ----------------
+audio_quick_heal_userspace(){
+  echo "==> (Audio/B) Mixer & PipeWire/WirePlumber-Heilung"
+  # Mixer (Karte 0) defensiv setzen
+  amixer -c 0 sset 'Auto-Mute Mode' Disabled 2>/dev/null || true
+  amixer -c 0 sset Speaker 100% unmute 2>/dev/null || true
+  amixer -c 0 sset Headphone mute 2>/dev/null || true
+  amixer -c 0 sset PCM 100% unmute 2>/dev/null || true
+
+  # User-Sounddienste frisch (falls vorhanden)
+  # Versuche, den aktiven GUI-User zu finden (id der Prozessgruppe mit grafischer Session)
+  ACTIVE_U="$(loginctl list-users 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $2}' | head -n1)"
+  if [[ -n "${ACTIVE_U:-}" ]]; then
+    UID="$(id -u "$ACTIVE_U")"
+    XDG_RUNTIME_DIR="/run/user/${UID}"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+    if [[ -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+      sudo -u "$ACTIVE_U" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+        systemctl --user restart wireplumber pipewire pipewire-pulse || true
+      # Default-Sink auf Analog
+      SINK="$(sudo -u "$ACTIVE_U" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+                pactl list short sinks 2>/dev/null | awk '/analog-stereo/ {print $2; exit}')"
+      if [[ -n "${SINK:-}" ]]; then
+        sudo -u "$ACTIVE_U" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+          pactl set-default-sink "$SINK" || true
+        sudo -u "$ACTIVE_U" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+          pactl set-sink-mute "$SINK" 0 || true
+        sudo -u "$ACTIVE_U" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+          pactl set-sink-volume "$SINK" 100% || true
+      fi
+    fi
+  fi
+}
+
+fix_audio(){
+  echo "==> (Audio) CS8409 prüfen & reparieren"
+  audio_quick_heal_kernel
+  # Status prüfen
   if lsmod | grep -q '^snd_hda_codec_cs8409'; then
-    echo "✅ CS8409 Modul geladen."
-    rm -f "\$FLAG_AUDIO_NEEDED" 2>/dev/null || true
+    echo "   → CS8409 geladen."
   else
-    echo "⚠️  CS8409 weiterhin nicht aktiv."
+    echo "⚠️  CS8409 nicht geladen. Prüfe Blacklist/Kernel."
+  fi
+  audio_quick_heal_userspace
+
+  # Flag wegräumen, wenn Modul jetzt da ist
+  if lsmod | grep -q '^snd_hda_codec_cs8409'; then
+    echo "✅ Audio aktiv (Modul geladen)."
+    rm -f "$FLAG_AUDIO_NEEDED" 2>/dev/null || true
+  else
+    echo "⚠️  Audio weiterhin nicht aktiv."
   fi
 }
 
-verify_only(){
-  # schreibt Statusdatei neu
-  /usr/local/bin/imac-wifi-audio-check.sh || true
-  cat /var/lib/imac-linux-wifi-audio/status.json 2>/dev/null || true
-}
-
-DO_WIFI=0; DO_AUDIO=0; VERIFY_ONLY=0
-for a in "\$@"; do
-  case "\$a" in
+DO_WIFI=0; DO_AUDIO=0
+for a in "$@"; do
+  case "$a" in
     --wifi) DO_WIFI=1 ;;
     --audio) DO_AUDIO=1 ;;
-    --verify-only) VERIFY_ONLY=1 ;;
     *) usage; exit 2 ;;
   esac
 done
 
 (( DO_WIFI )) && fix_wifi
 (( DO_AUDIO )) && fix_audio
-(( VERIFY_ONLY )) && verify_only
 EOF
 chmod 0755 "$FIX_BIN"
 
@@ -300,7 +326,7 @@ cat >"$POLKIT_POLICY" <<'EOF'
   <action id="com.frogro.imacwifi.fix">
     <description>iMac WiFi/Audio-Fix ausführen</description>
     <message>Authentifizieren, um WiFi/Audio-Fix als Administrator auszuführen</message>
-    <icon_name>multimedia-volume-control</icon_name>
+    <icon_name>audio-card</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
@@ -312,15 +338,15 @@ cat >"$POLKIT_POLICY" <<'EOF'
 </policyconfig>
 EOF
 
-# --- 5) User-Notifier (fragt Fixe an + refresht User-Soundstack) ---
-if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-  USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-  USER_UNIT_DIR="${USER_HOME}/.config/systemd/user"
-  NOTIFY_BIN="${USER_HOME}/.local/bin/imac-wifi-audio-notify.sh"
+# --- 5) User-Notifier (zeigt Popup & ruft pkexec Fix) ---
+U="$(get_real_user)"
+UIDNUM="$(id -u "$U")"
+USER_UNIT_DIR="/home/${U}/.config/systemd/user"
+NOTIFY_BIN="/home/${U}/.local/bin/imac-wifi-audio-notify.sh"
 
-  mkdir -p "$USER_UNIT_DIR" "${NOTIFY_BIN%/*}"
+mkdir -p "$USER_UNIT_DIR" "${NOTIFY_BIN%/imac-wifi-audio-notify.sh}"
 
-  cat >"$NOTIFY_BIN" <<'EOF'
+cat >"$NOTIFY_BIN" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 STATE_DIR="/var/lib/imac-linux-wifi-audio"
@@ -328,46 +354,55 @@ FLAG_AUDIO_NEEDED="${STATE_DIR}/needs_audio_fix"
 FLAG_WIFI_NEEDED="${STATE_DIR}/needs_wifi_fix"
 
 ask_yes_no(){
-  local msg="$1"
+  local msg="$1" t="iMac – Hinweis"
   if command -v zenity >/dev/null 2>&1; then
-    zenity --question --title="iMac – Hinweis" --text="$msg" && return 0 || return 1
+    zenity --question --title="$t" --text="$msg" && return 0 || return 1
   elif command -v kdialog >/dev/null 2>&1; then
     kdialog --yesno "$msg" && return 0 || return 1
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send "$t" "$msg
+(Öffne Terminal zur Bestätigung)"
+    read -p "${msg} [y/N]: " yn; [[ "${yn,,}" == "y" ]]
   else
-    read -p "$msg [y/N]: " yn; [[ "${yn,,}" == "y" ]]
+    read -p "${msg} [y/N]: " yn; [[ "${yn,,}" == "y" ]]
   fi
 }
 
-refresh_user_audio_stack(){
-  # Nach erfolgreichem Audio-Fix: PipeWire/WirePlumber neu starten (Userspace)
-  systemctl --user restart wireplumber pipewire pipewire-pulse 2>/dev/null || true
-}
-
 kernel="$(uname -r)"
+did_any=0
 
 if [[ -f "$FLAG_WIFI_NEEDED" ]]; then
-  msg_wifi="Nach Kernel-Wechsel auf ${kernel} ist WLAN inaktiv. Firmware & Modul neu einrichten?"
+  msg_wifi="Nach dem Kernel-Update auf ${kernel} ist WLAN nicht aktiv. Soll ich die Broadcom-Firmware neu einrichten und das Modul neu laden?"
   if ask_yes_no "$msg_wifi"; then
     pkexec /usr/local/sbin/imac-wifi-audio-fix.sh --wifi || true
+    did_any=1
   fi
 fi
 
 if [[ -f "$FLAG_AUDIO_NEEDED" ]]; then
-  msg_audio="Nach Kernel-Wechsel auf ${kernel} ist der Audiotreiber (CS8409) nicht aktiv. HDA-Stack frisch laden?"
+  msg_audio="Nach dem Kernel-Update auf ${kernel} konnte der Audiotreiber (CS8409) nicht geladen werden. Jetzt reparieren?"
   if ask_yes_no "$msg_audio"; then
     pkexec /usr/local/sbin/imac-wifi-audio-fix.sh --audio || true
-    # Egal ob erfolgreich oder nicht – Status neu abfragen und Userspace refreshen
-    /usr/local/sbin/imac-wifi-audio-fix.sh --verify-only >/dev/null 2>&1 || true
-    refresh_user_audio_stack
+    did_any=1
+  fi
+fi
+
+# Nach Fix ggf. Erfolg melden
+if [[ $did_any -eq 1 ]]; then
+  sudo /usr/local/bin/imac-wifi-audio-check.sh || true
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --info --title="iMac – Hinweis" --text="Check/Fix ausgeführt. Öffne Netzwerk-/Audioeinstellungen, falls weiterhin kein Ton/WLAN."
+  elif command -v kdialog >/dev/null 2>&1; then
+    kdialog --msgbox "Check/Fix ausgeführt. Öffne Netzwerk-/Audioeinstellungen, falls weiterhin kein Ton/WLAN."
   fi
 fi
 EOF
-  chmod +x "$NOTIFY_BIN"
+chmod +x "$NOTIFY_BIN"
 
-  USER_SERVICE_FILE="${USER_UNIT_DIR}/imac-wifi-audio-notify.service"
-  USER_TIMER_FILE="${USER_UNIT_DIR}/imac-wifi-audio-notify.timer"
+USER_SERVICE_FILE="$USER_UNIT_DIR/imac-wifi-audio-notify.service"
+USER_TIMER_FILE="$USER_UNIT_DIR/imac-wifi-audio-notify.timer"
 
-  cat >"$USER_SERVICE_FILE" <<EOF
+cat >"$USER_SERVICE_FILE" <<EOF
 [Unit]
 Description=iMac WiFi/Audio Notifier (user)
 After=graphical-session.target
@@ -377,7 +412,7 @@ Type=oneshot
 ExecStart=${NOTIFY_BIN}
 EOF
 
-  cat >"$USER_TIMER_FILE" <<'EOF'
+cat >"$USER_TIMER_FILE" <<'EOF'
 [Unit]
 Description=iMac WiFi/Audio Notifier Timer (user)
 
@@ -390,9 +425,9 @@ Unit=imac-wifi-audio-notify.service
 WantedBy=default.target
 EOF
 
-  # --user units ohne Hänger laden/aktivieren
-  userctl "$SUDO_USER" -- daemon-reload
-  userctl "$SUDO_USER" -- enable --now imac-wifi-audio-notify.timer
-fi
+# User-Units laden/aktivieren (robust)
+run_user "$U" systemctl --user daemon-reload
+run_user "$U" systemctl --user enable --now imac-wifi-audio-notify.timer || true
 
 echo "✅ Root-Check, pkexec-Helper, User-Notifier & persistenter FW-Mirror eingerichtet."
+echo "   (Audio-Fix enthält Schnelle Heilung A & B.)"
