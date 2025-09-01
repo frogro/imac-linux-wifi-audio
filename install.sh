@@ -5,165 +5,141 @@ REPO_URL="https://github.com/frogro/imac-linux-wifi-audio.git"
 REPO_BRANCH="main"
 
 bold(){ printf "\033[1m%s\033[0m\n" "$*"; }
-note(){ printf "%s\n" "$*"; }
-err(){ printf "\033[31m%s\033[0m\n" "$*" >&2; }
+info(){ printf "• %s\n" "$*"; }
+ok(){ printf "✅ %s\n" "$*"; }
+warn(){ printf "⚠️  %s\n" "$*"; }
+die(){ printf "❌ %s\n" "$*\n" >&2; exit 1; }
 
-# Prüft, ob wir bereits im geklonten Repo liegen (lokal)
-has_repo_layout() {
-  local base="$1"
-  [[ -f "$base/cirruslogic/install_cs8409_manual.sh" ]]
+need_root(){ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then die "Bitte als root/sudo ausführen."; fi; }
+need_root
+
+TMPROOT="$(mktemp -d /tmp/imac-linux-wifi-audio.XXXXXX)"
+CLEANUP(){ rm -rf "$TMPROOT"; }
+trap CLEANUP EXIT
+
+bold "==> Klone Repo nach: $TMPROOT"
+git clone --depth=1 --branch "$REPO_BRANCH" "$REPO_URL" "$TMPROOT" >/dev/null 2>&1 || {
+  die "Git-Clone fehlgeschlagen (Branch: $REPO_BRANCH, URL: $REPO_URL)"
+}
+REPO_ROOT="$TMPROOT"
+
+# Pfade im Repo
+KERNEL_SVC="${REPO_ROOT}/kernel_update_service.sh"
+BRCM_B2="${REPO_ROOT}/broadcom/b2"
+BRCM_B3="${REPO_ROOT}/broadcom/b3"
+
+# Zielorte
+STATE_DIR="/var/lib/imac-linux-wifi-audio"
+FW_DIR_BASE="/usr/local/share/imac-linux-wifi-audio/broadcom"
+FW_DIR_B2="${FW_DIR_BASE}/b2"
+FW_DIR_B3="${FW_DIR_BASE}/b3"
+
+mkdir -p "$STATE_DIR" "$FW_DIR_B2" "$FW_DIR_B3"
+
+menu(){
+  echo "== iMac Linux WiFi + Audio Installer =="
+  echo "1) WLAN installieren"
+  echo "2) Audio installieren"
+  echo "3) WLAN + Audio installieren"
+  echo "4) Nur Service installieren"
+  read -rp "> Auswahl [1-4]: " CH
+  echo "${CH:-4}"
 }
 
-# Arbeitsverzeichnis bestimmen
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR"
-TMPROOT=""
-CLEANUP=0
-
-if ! has_repo_layout "$REPO_ROOT"; then
-  # Kein Repo – hole frisches
-  command -v git >/dev/null 2>&1 || { err "git fehlt"; exit 1; }
-  TMPROOT="$(mktemp -d /tmp/imac-linux-wifi-audio.XXXXXX)"
-  CLEANUP=1
-  bold "==> Klone Repo nach: ${TMPROOT}"
-  if [[ -n "${REPO_BRANCH:-}" ]]; then
-    git clone --depth=1 --branch "$REPO_BRANCH" "$REPO_URL" "$TMPROOT"
-  else
-    git clone --depth=1 "$REPO_URL" "$TMPROOT"
+copy_fw_variant(){
+  local src="$1" dst="$2" count=0
+  if [[ -d "$src" ]]; then
+    shopt -s nullglob
+    install -d /lib/firmware/brcm
+    install -d "$dst"
+    for f in "$src"/brcmfmac4364*; do
+      install -m0644 "$f" /lib/firmware/brcm/
+      install -m0644 "$f" "$dst/"
+      ((count++)) || true
+    done
   fi
-  REPO_ROOT="$TMPROOT"
-  trap '[[ $CLEANUP -eq 1 ]] && rm -rf "$TMPROOT"' EXIT
-fi
-
-bold "== iMac Linux WiFi + Audio Installer =="
-echo "1) WLAN installieren"
-echo "2) Audio installieren"
-echo "3) WLAN + Audio installieren"
-echo "4) Nur Service installieren"
-read -rp "> Auswahl [1-4]: " CHOICE
-
-# Status-Abfragen (leichtgewichtig)
-wifi_is_up() {
-  ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -Eq '^(wlan|wl|wlp|p2p-dev-wl)' && return 0
-  lsmod | grep -q '^brcmfmac' && return 0
-  dmesg 2>/dev/null | grep -qi brcmfmac && return 0
-  return 1
-}
-audio_is_up() {
-  lsmod | grep -q '^snd_hda_codec_cs8409' && return 0
-  [[ -r /proc/asound/cards ]] && grep -Eqi 'cs8409|cirrus' /proc/asound/cards && return 0
-  aplay -l 2>/dev/null | grep -Eqi 'CS8409|Cirrus' && return 0
-  dmesg 2>/dev/null | grep -qi cs8409 && return 0
-  return 1
+  echo "$count"
 }
 
-# --- WLAN Installation (Firmware spiegeln/kopieren + brcmfmac hochziehen) ---
-do_wifi_install() {
-  # Firmware liegt im Repo unter broadcom/{b2,b3}
-  install -d /usr/local/share/imac-linux-wifi-audio/broadcom/b2 \
-             /usr/local/share/imac-linux-wifi-audio/broadcom/b3 \
-             /lib/firmware/brcm
-
-  shopt -s nullglob
-  local c1=0 c2=0
-  for f in "$REPO_ROOT"/broadcom/b2/brcmfmac4364*; do install -m0644 "$f" /lib/firmware/brcm/; ((c1++)); done
-  for f in "$REPO_ROOT"/broadcom/b3/brcmfmac4364*; do install -m0644 "$f" /lib/firmware/brcm/; ((c2++)); done
-  shopt -u nullglob
-
-  # Symlinks auf Apple-Varianten
-  pushd /lib/firmware/brcm >/dev/null || true
-  [[ -f brcmfmac4364b2-pcie.apple,midway.bin      ]] && ln -sf brcmfmac4364b2-pcie.apple,midway.bin      brcmfmac4364b2-pcie.bin
-  [[ -f brcmfmac4364b2-pcie.apple,midway.txt      ]] && ln -sf brcmfmac4364b2-pcie.apple,midway.txt      brcmfmac4364b2-pcie.txt
-  [[ -f brcmfmac4364b2-pcie.apple,midway.clm_blob ]] && ln -sf brcmfmac4364b2-pcie.apple,midway.clm_blob brcmfmac4364b2-pcie.clm_blob
-  [[ -f brcmfmac4364b2-pcie.apple,midway.txcap_blob ]] && ln -sf brcmfmac4364b2-pcie.apple,midway.txcap_blob brcmfmac4364b2-pcie.txcap_blob
-
-  [[ -f brcmfmac4364b3-pcie.apple,borneo.bin      ]] && ln -sf brcmfmac4364b3-pcie.apple,borneo.bin      brcmfmac4364b3-pcie.bin
-  [[ -f brcmfmac4364b3-pcie.apple,borneo.txt      ]] && ln -sf brcmfmac4364b3-pcie.apple,borneo.txt      brcmfmac4364b3-pcie.txt
-  [[ -f brcmfmac4364b3-pcie.apple,borneo.clm_blob ]] && ln -sf brcmfmac4364b3-pcie.apple,borneo.clm_blob brcmfmac4364b3-pcie.clm_blob
-  [[ -f brcmfmac4364b3-pcie.apple,borneo.txcap_blob ]] && ln -sf brcmfmac4364b3-pcie.apple,borneo.txcap_blob brcmfmac4364b3-pcie.txcap_blob
-  popd >/dev/null || true
-
-  # wl raus, brcmfmac rein
-  modprobe -r wl 2>/dev/null || true
+do_wifi(){
+  bold "==> WLAN-Firmware kopieren (BCM4364 b2/b3 inkl. .bin/.txt/.clm_blob/.txcap_blob)"
+  local c1 c2
+  c1="$(copy_fw_variant "$BRCM_B2" "$FW_DIR_B2")"
+  c2="$(copy_fw_variant "$BRCM_B3" "$FW_DIR_B3")"
+  info "FW-Mirror: b2=${c1} Dateien, b3=${c2} Dateien unter ${FW_DIR_BASE}"
+  # brcmfmac Basics (keine Fix-Logik hier – die macht später der Fix-Helper aus kernel_update_service.sh)
   echo "options brcmfmac p2pon=0" >/etc/modprobe.d/brcmfmac.conf || true
+  modprobe -r wl 2>/dev/null || true
   modprobe -r brcmfmac brcmutil cfg80211 2>/dev/null || true
-  modprobe cfg80211
-  modprobe brcmutil
-  modprobe brcmfmac
-  rfkill unblock wifi 2>/dev/null || true
+  modprobe cfg80211 || true
+  modprobe brcmutil || true
+  modprobe brcmfmac || true
   systemctl restart NetworkManager 2>/dev/null || true
 }
 
-# --- Audio Installation (CS8409 verfügbar machen + Autoload) ---
-do_audio_install() {
+do_audio(){
+  bold "==> Audio (CS8409) aktivieren"
+  # Nur Basisschritte; die volle Heilung (A & B) übernimmt später der Fix-Helper aus kernel_update_service.sh
   rm -f /etc/modprobe.d/blacklist-cs8409.conf 2>/dev/null || true
   echo snd_hda_codec_cs8409 >/etc/modules-load.d/snd_hda_codec_cs8409.conf
-  # Stack jetzt noch nicht hart neuladen – machen wir im Fix-Helper/Heilung, falls nötig.
+  modprobe -r snd_hda_codec_cs8409 2>/dev/null || true
+  modprobe -r snd_hda_intel 2>/dev/null || true
+  modprobe snd_hda_intel || true
+  modprobe snd_hda_codec_cs8409 || true
 }
 
-# --- Fix-Helper & Service einrichten (aus Repo) ---
-setup_service() {
-  local svc="${REPO_ROOT}/kernel_update_service.sh"
-  if [[ -f "$svc" ]]; then
-    bash "$svc"
+summarize(){
+  local wifi_ok="Nein" audio_ok="Nein"
+  if lsmod | grep -q '^brcmfmac'; then wifi_ok="Ja"; fi
+  if lsmod | grep -q '^snd_hda_codec_cs8409'; then audio_ok="Ja"; fi
+
+  echo
+  echo "== Zusammenfassung =="
+  echo "WLAN aktiv:  $wifi_ok"
+  echo "Audio aktiv: $audio_ok"
+  echo "Manifest: ${STATE_DIR}/manifest.txt"
+  echo
+  if [[ "$audio_ok" != "Ja" ]]; then
+    warn "Ein Neustart wird empfohlen, damit CS8409 sauber initialisiert."
+    echo "   Nach dem Reboot prüft der User-Notifier erneut."
   else
-    err "⚠️  kernel_update_service.sh nicht gefunden – Service wird übersprungen."
+    ok "Audio ist aktiv."
   fi
 }
 
+do_service(){
+  # EINZIGE Quelle für Fix-Helper/Checker/User-Notifier ist die kernel_update_service.sh aus dem Repo!
+  if [[ -x "$KERNEL_SVC" ]]; then
+    bold "==> Service/Checker via kernel_update_service.sh aus dem Repo einrichten"
+    # direkt aus dem geklonten Ordner starten (sie generiert: check.sh, fix.sh, user-notify, timer, usw.)
+    bash "$KERNEL_SVC"
+  else
+    warn "kernel_update_service.sh nicht gefunden – Service wird übersprungen."
+    warn "Erwartet an: $KERNEL_SVC"
+  fi
+}
+
+# --- Ablauf ---
+CHOICE="$(menu)"
 case "$CHOICE" in
-  1)
-    if wifi_is_up; then
-      echo "✔ WLAN ist bereits aktiv – überspringe Firmware-Installation."
-    else
-      do_wifi_install
-    fi
-    ;;
-  2)
-    if audio_is_up; then
-      echo "✔ Audio (CS8409) ist bereits aktiv – überspringe Installation."
-    else
-      do_audio_install
-    fi
-    ;;
-  3)
-    if wifi_is_up; then
-      echo "✔ WLAN ist bereits aktiv – überspringe Firmware-Installation."
-    else
-      do_wifi_install
-    fi
-    if audio_is_up; then
-      echo "✔ Audio (CS8409) ist bereits aktiv – überspringe Installation."
-    else
-      do_audio_install
-    fi
-    ;;
-  4)
-    # Nur Service/Timer/Notifier
-    :
-    ;;
-  *)
-    err "Ungültige Auswahl."
-    exit 2
-    ;;
+  1) do_wifi ;;
+  2) do_audio ;;
+  3) do_wifi; do_audio ;;
+  4) : ;;  # nur Service
+  *) die "Ungültige Auswahl." ;;
 esac
 
-read -rp $'\nService zur Kernel-Update-Prüfung einrichten? [y/N]: ' yn
-if [[ "${yn,,}" == "y" ]]; then
-  setup_service
+read -r -p $'Service zur Kernel-Update-Prüfung einrichten? [y/N]: ' yn
+if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
+  do_service
+else
+  info "Service-Einrichtung übersprungen."
 fi
 
-# Zusammenfassung
-WLAN_OK="Nein"; audio_OK="Nein"
-wifi_is_up && WLAN_OK="Ja"
-audio_is_up && audio_OK="Ja"
+# Manifest (nur informativ)
+{
+  echo "installed_at=$(date -Iseconds)"
+  echo "kernel=$(uname -r)"
+} >>"${STATE_DIR}/manifest.txt"
 
-cat <<EOF
-
-== Zusammenfassung ==
-WLAN aktiv:  ${WLAN_OK}
-Audio aktiv: ${audio_OK}
-Manifest: /var/lib/imac-linux-wifi-audio/manifest.txt
-
-⚠️  Ein Neustart wird empfohlen, damit CS8409 sauber initialisiert. Nach dem Reboot prüft der User-Notifier erneut.
-EOF
+summarize
