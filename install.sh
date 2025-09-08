@@ -1,356 +1,234 @@
 #!/usr/bin/env bash
-# iMac 2019 (iMac19,1): WLAN (BCM4364 b2/b3) + Audio (CS8409) Installer
-# - Debian 12/13 kompatibel
-# - Optional: Kernel-Upgrade via bookworm-backports (6.8+)
-# - WLAN: holt Firmware (Noa-Paket), wählt b2/b3 nach HW, setzt Symlinks
-# - Audio: aktiviert CS8409 (Basisschritte; DKMS-Bau separat möglich)
+# iMac 2019 (iMac19,1): WLAN (BCM4364 b2/b3) + Audio (CS8409 via DKMS)
+# Debian 12/13 kompatibel. Optional: Debian 12 Backports-Kernel (>=6.8).
+# WLAN: holt Firmware (Noa-Paket), setzt Symlinks (generisch + iMac19,1).
+# Audio: ersetzt Non-DKMS-Variante vollständig durch DKMS-Build.
 
 set -euo pipefail
 
-# ---------------------------
-# UI & Helpers
-# ---------------------------
 bold(){ printf "\033[1m%s\033[0m\n" "$*"; }
 info(){ printf "• %s\n" "$*"; }
 ok(){ printf "✅ %s\n" "$*"; }
 warn(){ printf "⚠️  %s\n" "$*"; }
 die(){ printf '❌ %s\n' "$*" >&2; exit 1; }
-
-need_root(){ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then die "Bitte als root/sudo ausführen."; fi; }
 have(){ command -v "$1" >/dev/null 2>&1; }
+need_root(){ [[ ${EUID:-$(id -u)} -eq 0 ]] || die "Bitte als root/sudo ausführen."; }
 
 need_root
 
-TMPROOT="$(mktemp -d /tmp/imac-linux-wifi-audio.XXXXXX)"
-CLEANUP(){ rm -rf "$TMPROOT"; }
-trap CLEANUP EXIT
-
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_URL="https://github.com/frogro/imac-linux-wifi-audio.git"
-REPO_BRANCH="main"
-REPO_ROOT="$TMPROOT" # wird ggf. auf SCRIPT_DIR gesetzt, falls git-Clone scheitert
+TMPROOT="$(mktemp -d /tmp/imac-linux-wifi-audio.XXXXXX)"
+trap 'rm -rf "$TMPROOT"' EXIT
 
-# Zielorte & Spiegel
 STATE_DIR="/var/lib/imac-linux-wifi-audio"
 FW_DIR_BASE="/usr/local/share/imac-linux-wifi-audio/broadcom"
 FW_DIR_B2="${FW_DIR_BASE}/b2"
 FW_DIR_B3="${FW_DIR_BASE}/b3"
 FW_RUNTIME="/lib/firmware/brcm"
-
 mkdir -p "$STATE_DIR" "$FW_DIR_B2" "$FW_DIR_B3" "$FW_RUNTIME"
 
-# Noa-Firmware-Paket (immer Quelle für Wi-Fi)
 FW_URL_DEFAULT="https://github.com/NoaHimesaka1873/apple-bcm-firmware/releases/download/v14.0/apple-bcm-firmware-14.0-1-any.pkg.tar.zst"
 
-# ---------------------------
-# Distro/Kernel-Erkennung
-# ---------------------------
+# Distro/Kernel
 ID_STR=""; CODENAME=""
-if [[ -r /etc/os-release ]]; then
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  ID_STR="${PRETTY_NAME:-${ID:-unknown}}"
-  CODENAME="${VERSION_CODENAME:-}"
-fi
+if [[ -r /etc/os-release ]]; then . /etc/os-release; ID_STR="${PRETTY_NAME:-$ID}"; CODENAME="${VERSION_CODENAME:-}"; fi
 
-# ---------------------------
-# Optional: Backports-Kernel (nur Debian 12/bookworm)
-# ---------------------------
 maybe_upgrade_kernel_backports() {
   bold "==> Kernel via Backports (optional)"
-
   if [[ "${ID:-}" != "debian" || "$CODENAME" != "bookworm" ]]; then
-    info "Nicht Debian 12/bookworm → Schritt wird übersprungen."
-    return 0
-  fi
-
-  local kv
-  kv="$(uname -r | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
-  # bereits >= 6.8?
-  awk -v kv="$kv" 'BEGIN{split(kv,a,"."); if(a[1]>6 || (a[1]==6 && a[2]>=8)) exit 0; else exit 1}'
-  if [[ $? -eq 0 ]]; then
-    ok "Aktiver Kernel ist bereits >= 6.8 (${kv}) – kein Upgrade nötig."
-    return 0
-  fi
-
-  printf "Erkanntes System: %s (Codename: %s)\n" "${ID_STR:-unknown}" "${CODENAME:-unknown}"
-  read -r -p "Backports eintragen & Kernel/Headers aus bookworm-backports installieren? [y/N]: " yn
-  if [[ ! "${yn:-N}" =~ ^[Yy]$ ]]; then
-    info "Backports-Upgrade übersprungen."
-    return 0
-  fi
-
-  info "Trage bookworm-backports (inkl. non-free-firmware) ein…"
-  mkdir -p /etc/apt/sources.list.d
-  echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware" \
-    > /etc/apt/sources.list.d/backports.list
-
-  info "Aktualisiere Paketlisten…"
-  apt-get update -y
-
-  info "Installiere neuen Kernel & Header aus Backports…"
-  apt-get -y -t bookworm-backports install linux-image-amd64 linux-headers-amd64
-
-  warn "Ein Neustart ist erforderlich, damit der neue Kernel aktiv wird."
-  echo "Optional: 'firmware-brcm80211' aus Backports:"
-  echo "  apt-get -y -t bookworm-backports install firmware-brcm80211"
-  read -r -p "Jetzt sofort neu starten? [y/N]: " rn
-  if [[ "${rn:-N}" =~ ^[Yy]$ ]]; then
-    reboot
-  else
-    info "Fahre ohne Neustart fort (aktueller Kernel bleibt aktiv)."
-  fi
+    info "Nicht Debian 12/bookworm → übersprungen."; return 0; fi
+  local kv; kv="$(uname -r | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
+  awk -v kv="$kv" 'BEGIN{split(kv,a,"."); exit ! (a[1]>6 || (a[1]==6 && a[2]>=8)) }' || {
+    printf "Erkannt: %s (%s)\n" "$ID_STR" "$CODENAME"
+    read -r -p "Backports eintragen & Kernel/Headers installieren? [y/N]: " yn
+    [[ "${yn:-N}" =~ ^[Yy]$ ]] || { info "Backports-Upgrade übersprungen."; return 0; }
+    info "Trage bookworm-backports ein…"
+    echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware" \
+      > /etc/apt/sources.list.d/backports.list
+    apt-get update -y
+    apt-get -y -t bookworm-backports install linux-image-amd64 linux-headers-amd64
+    warn "Neustart erforderlich, damit neuer Kernel aktiv wird."
+    read -r -p "Jetzt neu starten? [y/N]: " rn; [[ "${rn:-N}" =~ ^[Yy]$ ]] && reboot
+  }
 }
 
-# ---------------------------
-# Git-Clone mit Fallback
-# ---------------------------
-clone_or_fallback() {
-  bold "==> Klone Repo nach: $TMPROOT"
-  if have git; then
-    if git clone --depth=1 --branch "$REPO_BRANCH" "$REPO_URL" "$TMPROOT" >/dev/null 2>&1; then
-      ok "Git-Clone ok."
-      REPO_ROOT="$TMPROOT"
-      return 0
-    else
-      warn "Git-Clone fehlgeschlagen – verwende lokalen Skriptordner als Fallback."
-    fi
-  else
-    warn "git nicht installiert – verwende lokalen Skriptordner als Fallback."
-  fi
-
-  # Fallback auf lokalen Ordner (nur für Audio/Service; Wi-Fi kommt stets aus Noa-Paket)
-  REPO_ROOT="$SCRIPT_DIR"
-}
-
-# ---------------------------
-# WLAN: IMMER aus Noa-Paket
-# ---------------------------
-
+# --- WLAN (BCM4364 b2/b3, Noa) ---
 chip_present(){ lspci -nn | grep -qi '14e4:4464'; }
-
-detect_hw_rev(){
-  # sucht "BCM4364/2" oder "/3" in dmesg; gibt "2" oder "3" zurück (oder leer)
-  local d; d="$(dmesg | grep -m1 -o 'BCM4364/[23]' || true)"
-  [[ -n "$d" ]] && echo "${d##*/}" || echo ""
-}
-
-preferred_family_for_rev(){
-  # Policy: /3 ⇒ b2(midway), /2 ⇒ b3(borneo)
-  case "$1" in
-    3) echo "b2";;
-    2) echo "b3";;
-    *) echo "b2";; # Default b2, weil bei dir stabil
-  esac
-}
+detect_hw_rev(){ local d; d="$(dmesg | grep -m1 -o 'BCM4364/[23]' || true)"; [[ -n "$d" ]] && echo "${d##*/}" || echo ""; }
+preferred_family_for_rev(){ case "$1" in 3) echo b2;; 2) echo b3;; *) echo b2;; esac; }
 
 pick_txt_from_pkg(){
-  # wählt & installiert passende TXT aus entpacktem Paket nach /lib/firmware/brcm
   local fam="$1" src="$2" picked=""
   install -d -m0755 "$FW_RUNTIME"
   shopt -s nullglob
   if [[ "$fam" == "b2" ]]; then
-    for cand in \
-      brcmfmac4364b2-pcie.apple,midway-HRPN-m.txt \
-      brcmfmac4364b2-pcie.apple,midway-HRPN-u.txt; do
+    for cand in brcmfmac4364b2-pcie.apple,midway-HRPN-m.txt brcmfmac4364b2-pcie.apple,midway-HRPN-u.txt; do
       [[ -f "$src/$cand" ]] && { picked="$cand"; break; }
     done
-    if [[ -n "$picked" ]]; then
-      install -m0644 "$src/$picked" "$FW_RUNTIME/brcmfmac4364b2-pcie.apple,midway.txt"
-      ok "TXT gewählt: $picked → brcmfmac4364b2-pcie.apple,midway.txt"
-    fi
+    [[ -n "$picked" ]] && install -m0644 "$src/$picked" "$FW_RUNTIME/brcmfmac4364b2-pcie.apple,midway.txt"
   else
-    for cand in \
-      brcmfmac4364b3-pcie.apple,borneo-HRPN-u-7.9.txt \
-      brcmfmac4364b3-pcie.apple,borneo-HRPN-u-7.7.txt \
-      brcmfmac4364b3-pcie.apple,borneo-HRPN-m.txt; do
+    for cand in brcmfmac4364b3-pcie.apple,borneo-HRPN-u-7.9.txt brcmfmac4364b3-pcie.apple,borneo-HRPN-u-7.7.txt brcmfmac4364b3-pcie.apple,borneo-HRPN-m.txt; do
       [[ -f "$src/$cand" ]] && { picked="$cand"; break; }
     done
-    if [[ -n "$picked" ]]; then
-      install -m0644 "$src/$picked" "$FW_RUNTIME/brcmfmac4364b3-pcie.apple,borneo.txt"
-      ok "TXT gewählt: $picked → brcmfmac4364b3-pcie.apple,borneo.txt"
-    fi
+    [[ -n "$picked" ]] && install -m0644 "$src/$picked" "$FW_RUNTIME/brcmfmac4364b3-pcie.apple,borneo.txt"
   fi
   shopt -u nullglob
-  [[ -n "$picked" ]]
+  [[ -n "$picked" ]] && ok "TXT gewählt: $picked" || warn "Keine passende .txt gefunden (Kalibrierung ggf. suboptimal)."
 }
 
 install_family_from_pkg(){
-  # kopiert bin/clm/txcap (+TXT) und setzt Symlinks (generisch + iMac19,1)
   local fam="$1" src="$2" base label
-  if [[ "$fam" == "b2" ]]; then base="brcmfmac4364b2-pcie.apple,midway"; label="midway";
-  else base="brcmfmac4364b3-pcie.apple,borneo"; label="borneo"; fi
-
+  if [[ "$fam" == "b2" ]]; then base="brcmfmac4364b2-pcie.apple,midway"; label="midway"; else base="brcmfmac4364b3-pcie.apple,borneo"; label="borneo"; fi
   install -d -m0755 "$FW_RUNTIME"
-  for ext in bin clm_blob txcap_blob; do
-    [[ -f "$src/${base}.${ext}" ]] || die "Fehlt im Paket: ${base}.${ext}"
-    install -m0644 "$src/${base}.${ext}" "$FW_RUNTIME/${base}.${ext}"
-  done
-  pick_txt_from_pkg "$fam" "$src" || warn "Keine passende .txt im Paket gefunden (Kalibrierung ggf. suboptimal)."
-
-  # generische Symlinks
+  for ext in bin clm_blob txcap_blob; do [[ -f "$src/${base}.${ext}" ]] || die "Fehlt: ${base}.${ext}"; install -m0644 "$src/${base}.${ext}" "$FW_RUNTIME/${base}.${ext}"; done
+  pick_txt_from_pkg "$fam" "$src"
   ln -sf "${base}.bin"        "$FW_RUNTIME/brcmfmac4364-pcie.bin"
   ln -sf "${base}.clm_blob"   "$FW_RUNTIME/brcmfmac4364-pcie.clm_blob"
   ln -sf "${base}.txcap_blob" "$FW_RUNTIME/brcmfmac4364-pcie.txcap_blob"
-  # TXT Symlinks (falls vorhanden)
-  if [[ -f "$FW_RUNTIME/${base}.txt" ]]; then
-    ln -sf "${base}.txt" "$FW_RUNTIME/brcmfmac4364-pcie.txt"
-    ln -sf "${base}.txt" "$FW_RUNTIME/brcmfmac4364-pcie.Apple Inc.-iMac19,1.txt"
-  fi
-  # Apple Board Name
+  [[ -f "$FW_RUNTIME/${base}.txt" ]] && ln -sf "${base}.txt" "$FW_RUNTIME/brcmfmac4364-pcie.txt"
+  # Board-spezifisch:
   ln -sf "${base}.bin"        "$FW_RUNTIME/brcmfmac4364-pcie.Apple Inc.-iMac19,1.bin"
   ln -sf "${base}.clm_blob"   "$FW_RUNTIME/brcmfmac4364-pcie.Apple Inc.-iMac19,1.clm_blob"
   ln -sf "${base}.txcap_blob" "$FW_RUNTIME/brcmfmac4364-pcie.Apple Inc.-iMac19,1.txcap_blob"
-
+  [[ -f "$FW_RUNTIME/${base}.txt" ]] && ln -sf "${base}.txt" "$FW_RUNTIME/brcmfmac4364-pcie.Apple Inc.-iMac19,1.txt"
   ok "Installiert: ${label} (${fam}) → $FW_RUNTIME"
 }
 
 reload_wifi_stack(){
-  # kleine Netztweaks + Module neu laden + NM neu starten
   echo "options brcmfmac p2pon=0" >/etc/modprobe.d/brcmfmac.conf || true
   modprobe -r wl 2>/dev/null || true
   modprobe -r brcmfmac brcmutil cfg80211 2>/dev/null || true
-  modprobe cfg80211 || true
-  modprobe brcmutil || true
-  modprobe brcmfmac || true
-  if ! have rfkill; then apt-get update -y && apt-get install -y rfkill; fi
+  modprobe cfg80211 || true; modprobe brcmutil || true; modprobe brcmfmac || true
+  have rfkill || { apt-get update -y; apt-get install -y rfkill; }
   rfkill unblock all || true
   systemctl restart NetworkManager 2>/dev/null || true
 }
 
 do_wifi(){
-  bold "==> WLAN installieren (BCM4364 b2/b3 aus Noa-Paket)"
+  bold "==> WLAN installieren (BCM4364 b2/b3 via Noa)"
   chip_present || die "BCM4364 (14e4:4464) nicht gefunden."
-
-  have curl || die "curl fehlt."
-  have tar  || die "tar fehlt."
-  local ZSTD_FLAG="--zstd"
-  tar --help | grep -q -- --zstd || ZSTD_FLAG="--use-compress-program=unzstd"
-
-  local TMP="$(mktemp -d /tmp/bcm4364.XXXXXX)"
-  local PKG="$TMP/fw.pkg.tar.zst"
-  local EX="$TMP/extract"
-  trap 'rm -rf "$TMP"' RETURN
-
-  # HW-Erkennung -> Family
-  local HWREV PREF FAM
-  HWREV="$(detect_hw_rev || true)"
-  PREF="$(preferred_family_for_rev "$HWREV")"
-  FAM="$PREF"
+  have curl || die "curl fehlt."; have tar  || die "tar fehlt."
+  local ZSTD_FLAG="--zstd"; tar --help | grep -q -- --zstd || ZSTD_FLAG="--use-compress-program=unzstd"
+  local TMP="$TMPROOT/fw"; mkdir -p "$TMP"; local PKG="$TMP/fw.pkg.tar.zst" EX="$TMP/extract"
+  local HWREV PREF FAM; HWREV="$(detect_hw_rev || true)"; PREF="$(preferred_family_for_rev "$HWREV")"; FAM="$PREF"
   bold "→ Auto-Erkennung: BCM4364/${HWREV:-?} ⇒ wähle ${FAM}"
-
-  bold "==> Lade Firmware-Paket"
-  curl -fL "$FW_URL_DEFAULT" -o "$PKG"
-  ok "Download ok: $(du -h "$PKG" | awk '{print $1}')"
-
-  bold "==> Entpacke Paket"
-  mkdir -p "$EX"
-  tar $ZSTD_FLAG -xvf "$PKG" -C "$EX" >/dev/null
-  local SRC="$EX/usr/lib/firmware/brcm"
-  [[ -d "$SRC" ]] || die "Paket-Struktur unerwartet. Kein brcm/-Ordner gefunden."
-
+  curl -fL "$FW_URL_DEFAULT" -o "$PKG"; ok "Download ok: $(du -h "$PKG" | awk '{print $1}')"
+  mkdir -p "$EX"; tar $ZSTD_FLAG -xvf "$PKG" -C "$EX" >/dev/null
+  local SRC="$EX/usr/lib/firmware/brcm"; [[ -d "$SRC" ]] || die "Paket-Struktur unerwartet."
   install_family_from_pkg "$FAM" "$SRC"
   reload_wifi_stack
-
-  echo
-  bold "Kurzreport"
-  dmesg -T | egrep -i 'brcmfmac|firmware|bcm4364' | tail -n 40 || true
-  nmcli -g WIFI radio || true
-  nmcli dev status || true
-  echo
-  echo "If you do not see Wi-Fi yet, try a reboot."
-  read -r -p "Reboot now? [y/N]: " ans
-  [[ "${ans:-N}" =~ ^[Yy]$ ]] && reboot
+  echo; bold "Kurzreport (Wi-Fi)"; dmesg -T | egrep -i 'brcmfmac|firmware|bcm4364' | tail -n 40 || true; nmcli dev status || true
 }
 
-# ---------------------------
-# Audio (CS8409): Basisschritte
-# ---------------------------
+# --- Audio via DKMS (ersetzt Non-DKMS) ---
 do_audio(){
-  bold "==> Audio (CS8409) aktivieren (Basisschritte)"
-  rm -f /etc/modprobe.d/blacklist-cs8409.conf 2>/dev/null || true
-  echo snd_hda_codec_cs8409 >/etc/modules-load.d/snd_hda_codec_cs8409.conf
+  bold "==> Audio (CS8409) via DKMS installieren"
+  apt-get update -y
+  apt-get install -y git dkms rsync sed linux-headers-amd64 "linux-headers-$(uname -r)" || true
+
+  local PKG="snd-hda-codec-cs8409" UPSTREAM_URL="https://github.com/davidjo/snd_hda_macbookpro.git" DEFAULT_REF="master"
+  local WORK_DIR="$TMPROOT/upstream-cs8409"
+  rm -rf "$WORK_DIR"; git clone --depth 1 --branch "$DEFAULT_REF" "$UPSTREAM_URL" "$WORK_DIR"
+  local SHORTSHA DATE PKG_VERSION; SHORTSHA="$(git -C "$WORK_DIR" rev-parse --short=7 HEAD)"; DATE="$(date +%Y%m%d)"
+  PKG_VERSION="1.0+${DATE}-${SHORTSHA}"; info "DKMS-Version: ${PKG_VERSION}"
+
+  bold "==> Alte DKMS-Versionen entfernen"
+  while read -r line; do
+    local ver; ver="${line#${PKG}/}"; ver="${ver%%,*}"; [[ -n "$ver" ]] || continue
+    dkms remove -m "${PKG}" -v "${ver}" --all || true; rm -rf "/usr/src/${PKG}-${ver}" || true
+  done < <(dkms status | grep "^${PKG}/" || true); rm -rf "/var/lib/dkms/${PKG}" || true
+
+  local DKMS_SRC="/usr/src/${PKG}-${PKG_VERSION}"
+  bold "==> Quellen nach ${DKMS_SRC}"; rm -rf "${DKMS_SRC}"; mkdir -p "${DKMS_SRC}"
+  rsync -a --delete --exclude ".git" "${WORK_DIR}/" "${DKMS_SRC}/"
+
+  if [[ -f "${SCRIPT_DIR}/dkms.conf" ]]; then install -m 0644 "${SCRIPT_DIR}/dkms.conf" "${DKMS_SRC}/dkms.conf"
+  elif [[ ! -f "${DKMS_SRC}/dkms.conf" ]]; then die "dkms.conf fehlt (Repo & Upstream)."; fi
+  sed -i -E "s/^PACKAGE_VERSION=\"[^\"]*\"/PACKAGE_VERSION=\"${PKG_VERSION}\"/" "${DKMS_SRC}/dkms.conf"
+  grep -q "^BUILT_MODULE_LOCATION\[0\]=" "${DKMS_SRC}/dkms.conf" || echo 'BUILT_MODULE_LOCATION[0]="build/hda"' >> "${DKMS_SRC}/dkms.conf"
+
+  bold "==> DKMS add/build/install"
+  dkms add -m "${PKG}" -v "${PKG_VERSION}" || true
+  dkms build -m "${PKG}" -v "${PKG_VERSION}"
+  dkms install -m "${PKG}" -v "${PKG_VERSION}"
+
+  bold "==> depmod & Module neu laden"
+  depmod -a
   modprobe -r snd_hda_codec_cs8409 2>/dev/null || true
-  modprobe -r snd_hda_intel 2>/dev/null || true
-  modprobe snd_hda_intel || true
-  modprobe snd_hda_codec_cs8409 || true
+  modprobe snd_hda_intel 2>/dev/null || true
+  modprobe snd_hda_codec_cs8409 2>/dev/null || true
+
+  ok  "DKMS installiert: ${PKG}-${PKG_VERSION}"
+  modinfo snd_hda_codec_cs8409 2>/dev/null | egrep 'filename|version' || true
+  dmesg -T | egrep -i 'snd|hda|cs8409' | tail -n 60 || true
 }
 
-# ---------------------------
-# Menü
-# ---------------------------
 menu(){
   {
     echo "== iMac Linux WiFi + Audio Installer =="
     echo "1) WLAN installieren"
-    echo "2) Audio installieren (CS8409, Basis)"
+    echo "2) Audio installieren (CS8409 via DKMS)"
     echo "3) WLAN + Audio installieren"
     echo "4) Kernel aktualisieren (Debian 12: Backports)"
-    echo "5) Nur Service/Checks überspringen (nichts tun)"
+    echo "5) Checker/Notifier/Polkit einrichten"
   } >&2
   read -rp "> Auswahl [1-5]: " CH
   printf '%s\n' "${CH:-3}"
 }
 
-# ---------------------------
-# Ablauf
-# ---------------------------
-bold "==> Voraussetzungen (Basis-Tools)"
+bold "==> Basis-Tools"
 apt-get update -y
-apt-get install -y ca-certificates curl grep sed gawk coreutils \
-                    network-manager
-
-maybe_upgrade_kernel_backports
-clone_or_fallback
+apt-get install -y ca-certificates curl grep sed gawk coreutils network-manager pciutils tar
 
 CHOICE="$(menu)"
 case "$CHOICE" in
   1) do_wifi ;;
   2) do_audio ;;
   3) do_wifi; do_audio ;;
-  4) maybe_upgrade_kernel_backports ;; # falls erneut gewählt
-  5) : ;;
+  4) maybe_upgrade_kernel_backports ;;
+  5) bash "$SCRIPT_DIR/scripts/kernel_update_service.sh" ;;
   *) die "Ungültige Auswahl." ;;
 esac
 
-# Manifest (informativ)
+# Manifest
 {
   echo "installed_at=$(date -Iseconds)"
   echo "kernel=$(uname -r)"
 } >>"${STATE_DIR}/manifest.txt"
 
-# ---------------------------
-# Zusammenfassung
-# ---------------------------
-summarize(){
-  local wifi_ok="Nein" audio_ok="Nein"
-  if lsmod | grep -q '^brcmfmac'; then wifi_ok="Ja"; fi
-  if lsmod | grep -q '^snd_hda_codec_cs8409'; then audio_ok="Ja"; fi
+# Zusammenfassung (+ erkennt Kernel-vs-DKMS & Firmware-Quelle)
+echo
+bold "== Zusammenfassung =="
+wifi_ok="Nein"; audio_ok="Nein"
+lsmod | grep -q '^brcmfmac' && wifi_ok="Ja"
+lsmod | grep -q '^snd_hda_codec_cs8409' && audio_ok="Ja"
+echo "System:   ${ID_STR:-unbekannt} (Codename: ${CODENAME:-n/a})"
+echo "Kernel:   $(uname -r)"
+echo "WLAN:     $wifi_ok"
+echo "Audio:    $audio_ok"
+echo "Firmware: ${FW_RUNTIME}"
+echo "Manifest: ${STATE_DIR}/manifest.txt"
+echo
 
-  echo
-  echo "== Zusammenfassung =="
-  echo "System:  ${ID_STR:-unbekannt} (Codename: ${CODENAME:-n/a})"
-  echo "Kernel:  $(uname -r)"
-  echo "WLAN aktiv:  $wifi_ok"
-  echo "Audio aktiv: $audio_ok"
-  echo "Firmware:    ${FW_RUNTIME}"
-  echo "Mirror:      ${FW_DIR_BASE}"
-  echo "Manifest:    ${STATE_DIR}/manifest.txt"
-  echo
+echo "Audio (Quelle):"
+if modinfo snd_hda_codec_cs8409 &>/dev/null; then
+  modinfo snd_hda_codec_cs8409 | grep filename | sed 's/^/  /'
+  modinfo snd_hda_codec_cs8409 | grep ^version | sed 's/^/  /' || true
+  case "$(modinfo snd_hda_codec_cs8409 | awk -F: '/filename/{print $2}')" in
+    *"/updates/dkms/"*) echo "  → DKMS-Modul aktiv";;
+    *"/kernel/sound/pci/hda/"*) echo "  → In-Kernel-Modul aktiv (DKMS evtl. überflüssig)";;
+  esac
+else
+  echo "  (modinfo nicht verfügbar)"
+fi
 
-  if [[ "$wifi_ok" != "Ja" ]]; then
-    warn "WLAN ist noch nicht aktiv. Prüfe Symlinks und Logs:"
-    echo "   ls -l /lib/firmware/brcm | grep 4364"
-    echo "   dmesg -T | egrep -i 'brcmf|firmware|bcm4364' | tail -n 80"
-    echo "   nmcli device status"
-  else
-    ok "WLAN sollte bereitstehen. 'nmcli dev wifi list' zeigt verfügbare Netze."
-  fi
-
-  if [[ "$audio_ok" != "Ja" ]]; then
-    warn "Ein Neustart wird oft benötigt, damit CS8409 sauber initialisiert."
-  else
-    ok "Audio (CS8409) ist aktiv."
-  fi
-}
-summarize
+echo
+echo "WLAN (Firmware-Quelle):"
+if dpkg -S /lib/firmware/brcm/brcmfmac4364b2-pcie.bin >/dev/null 2>&1 || \
+   dpkg -S /lib/firmware/brcm/brcmfmac4364b3-pcie.bin >/dev/null 2>&1; then
+  echo "  → Bereitgestellt durch Debian-Paket (firmware-brcm80211 o.ä.)"
+else
+  echo "  → Bereitgestellt durch Noa-Paket + Symlinks"
+fi
+echo
+ok "Fertig."
