@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # iMac 2019 (iMac19,1): WLAN (BCM4364 b2/b3) + Audio (CS8409 via DKMS)
-# Debian 12/13 kompatibel. Optional: Debian 12 Backports-Kernel (>=6.8).
+# Debian 12/13 kompatibel. Erfordert Kernel >= 6.8 (Debian 12 via Backports).
 # WLAN: holt Firmware (Noa-Paket), setzt Symlinks (generisch + iMac19,1).
 # Audio: ersetzt Non-DKMS-Variante vollständig durch DKMS-Build.
 
@@ -29,30 +29,43 @@ mkdir -p "$STATE_DIR" "$FW_DIR_B2" "$FW_DIR_B3" "$FW_RUNTIME"
 
 FW_URL_DEFAULT="https://github.com/NoaHimesaka1873/apple-bcm-firmware/releases/download/v14.0/apple-bcm-firmware-14.0-1-any.pkg.tar.zst"
 
-# Distro/Kernel
+# --- Distro/Kernel ---
 ID_STR=""; CODENAME=""
 if [[ -r /etc/os-release ]]; then . /etc/os-release; ID_STR="${PRETTY_NAME:-$ID}"; CODENAME="${VERSION_CODENAME:-}"; fi
 
-maybe_upgrade_kernel_backports() {
-  bold "==> Kernel via Backports (optional)"
-  if [[ "${ID:-}" != "debian" || "$CODENAME" != "bookworm" ]]; then
-    info "Nicht Debian 12/bookworm → übersprungen."; return 0; fi
-  local kv; kv="$(uname -r | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
-  awk -v kv="$kv" 'BEGIN{split(kv,a,"."); exit ! (a[1]>6 || (a[1]==6 && a[2]>=8)) }' || {
-    printf "Erkannt: %s (%s)\n" "$ID_STR" "$CODENAME"
-    read -r -p "Backports eintragen & Kernel/Headers installieren? [y/N]: " yn
-    [[ "${yn:-N}" =~ ^[Yy]$ ]] || { info "Backports-Upgrade übersprungen."; return 0; }
-    info "Trage bookworm-backports ein…"
-    echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware" \
-      > /etc/apt/sources.list.d/backports.list
-    apt-get update -y
-    apt-get -y -t bookworm-backports install linux-image-amd64 linux-headers-amd64
-    warn "Neustart erforderlich, damit neuer Kernel aktiv wird."
-    read -r -p "Jetzt neu starten? [y/N]: " rn; [[ "${rn:-N}" =~ ^[Yy]$ ]] && reboot
-  }
+ver_ge() { # usage: ver_ge 6.8 6.12
+  awk -v A="$1" -v B="$2" 'BEGIN{
+    split(A,a,"."); split(B,b,"."); 
+    if(a[1]>b[1]) exit 0; if(a[1]<b[1]) exit 1;
+    if(a[2]>=b[2]) exit 0; else exit 1
+  }'
 }
 
-# --- WLAN (BCM4364 b2/b3, Noa) ---
+kernel_base_ver() { uname -r | sed -E 's/^([0-9]+\.[0-9]+).*/\1/'; }
+
+require_kernel_6_8_plus() {
+  local kv; kv="$(kernel_base_ver)"
+  if ver_ge "$kv" "6.8"; then
+    ok "Kernel ausreichend: $(uname -r) (Basis $kv ≥ 6.8)"
+    return 0
+  fi
+
+  warn "Aktueller Kernel zu alt: $(uname -r) (Basis $kv < 6.8)"
+  if [[ "${ID:-}" = "debian" && "$CODENAME" = "bookworm" ]]; then
+    read -r -p "Backports eintragen & Kernel/Headers installieren? [y/N]: " yn
+    if [[ "${yn:-N}" =~ ^[Yy]$ ]]; then
+      echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware" \
+        > /etc/apt/sources.list.d/backports.list
+      apt-get update -y
+      apt-get -y -t bookworm-backports install linux-image-amd64 linux-headers-amd64
+      bold "==> Bitte JETZT neu starten und das Script erneut ausführen."
+      exit 0
+    fi
+  fi
+  die "Kernel >= 6.8 erforderlich. Bitte aktualisieren und erneut starten."
+}
+
+# --- Wi-Fi Helpers ---
 chip_present(){ lspci -nn | grep -qi '14e4:4464'; }
 detect_hw_rev(){ local d; d="$(dmesg | grep -m1 -o 'BCM4364/[23]' || true)"; [[ -n "$d" ]] && echo "${d##*/}" || echo ""; }
 preferred_family_for_rev(){ case "$1" in 3) echo b2;; 2) echo b3;; *) echo b2;; esac; }
@@ -98,9 +111,13 @@ reload_wifi_stack(){
   echo "options brcmfmac p2pon=0" >/etc/modprobe.d/brcmfmac.conf || true
   modprobe -r wl 2>/dev/null || true
   modprobe -r brcmfmac brcmutil cfg80211 2>/dev/null || true
-  modprobe cfg80211 || true; modprobe brcmutil || true; modprobe brcmfmac || true
+  sleep 0.5
+  modprobe cfg80211 || true
+  modprobe brcmutil || true
+  modprobe brcmfmac || true
   have rfkill || { apt-get update -y; apt-get install -y rfkill; }
   rfkill unblock all || true
+  udevadm settle || true
   systemctl restart NetworkManager 2>/dev/null || true
 }
 
@@ -159,7 +176,7 @@ do_audio(){
   modprobe snd_hda_codec_cs8409 2>/dev/null || true
 
   ok  "DKMS installiert: ${PKG}-${PKG_VERSION}"
-  modinfo snd_hda_codec_cs8409 2>/dev/null | egrep 'filename|version' || true
+  modinfo snd_hda_codec_cs8409 2>/dev/null | egrep 'filename|version|vermagic' || true
   dmesg -T | egrep -i 'snd|hda|cs8409' | tail -n 60 || true
 }
 
@@ -169,24 +186,27 @@ menu(){
     echo "1) WLAN installieren"
     echo "2) Audio installieren (CS8409 via DKMS)"
     echo "3) WLAN + Audio installieren"
-    echo "4) Kernel aktualisieren (Debian 12: Backports)"
-    echo "5) Checker/Notifier/Polkit einrichten"
+    echo "4) Checker/Notifier/Polkit einrichten"
   } >&2
-  read -rp "> Auswahl [1-5]: " CH
+  read -rp "> Auswahl [1/2/3/4]: " CH
   printf '%s\n' "${CH:-3}"
 }
 
+# ---------- Ablauf ----------
 bold "==> Basis-Tools"
 apt-get update -y
 apt-get install -y ca-certificates curl grep sed gawk coreutils network-manager pciutils tar
 
+# NEU: Kernel-Anforderung vorschalten
+require_kernel_6_8_plus
+
 CHOICE="$(menu)"
+AUDIO_RAN=0
 case "$CHOICE" in
   1) do_wifi ;;
-  2) do_audio ;;
-  3) do_wifi; do_audio ;;
-  4) maybe_upgrade_kernel_backports ;;
-  5) bash "$SCRIPT_DIR/scripts/kernel_update_service.sh" ;;
+  2) do_audio; AUDIO_RAN=1 ;;
+  3) do_wifi; do_audio; AUDIO_RAN=1 ;;
+  4) bash "$SCRIPT_DIR/scripts/kernel_update_service.sh" ;;
   *) die "Ungültige Auswahl." ;;
 esac
 
@@ -196,12 +216,21 @@ esac
   echo "kernel=$(uname -r)"
 } >>"${STATE_DIR}/manifest.txt"
 
-# Zusammenfassung (+ erkennt Kernel-vs-DKMS & Firmware-Quelle)
+# Zusammenfassung (robuster)
 echo
 bold "== Zusammenfassung =="
 wifi_ok="Nein"; audio_ok="Nein"
-lsmod | grep -q '^brcmfmac' && wifi_ok="Ja"
-lsmod | grep -q '^snd_hda_codec_cs8409' && audio_ok="Ja"
+
+# Wi-Fi okay, wenn Modul geladen UND ein wlp*-Interface existiert (egal ob verbunden)
+if lsmod | grep -q '^brcmfmac'; then
+  if ip -o link | awk -F': ' '{print $2}' | grep -Eq '^wl'; then wifi_ok="Ja"; fi
+fi
+
+# Audio okay, wenn Modul geladen ODER CS8409 in /proc/asound/cards auftaucht
+if lsmod | grep -q '^snd_hda_codec_cs8409' || grep -qi 'CS8409' /proc/asound/cards 2>/dev/null; then
+  audio_ok="Ja"
+fi
+
 echo "System:   ${ID_STR:-unbekannt} (Codename: ${CODENAME:-n/a})"
 echo "Kernel:   $(uname -r)"
 echo "WLAN:     $wifi_ok"
@@ -209,11 +238,9 @@ echo "Audio:    $audio_ok"
 echo "Firmware: ${FW_RUNTIME}"
 echo "Manifest: ${STATE_DIR}/manifest.txt"
 echo
-
 echo "Audio (Quelle):"
 if modinfo snd_hda_codec_cs8409 &>/dev/null; then
-  modinfo snd_hda_codec_cs8409 | grep filename | sed 's/^/  /'
-  modinfo snd_hda_codec_cs8409 | grep ^version | sed 's/^/  /' || true
+  modinfo snd_hda_codec_cs8409 | grep -E 'filename|^version|vermagic' | sed 's/^/  /'
   case "$(modinfo snd_hda_codec_cs8409 | awk -F: '/filename/{print $2}')" in
     *"/updates/dkms/"*) echo "  → DKMS-Modul aktiv";;
     *"/kernel/sound/pci/hda/"*) echo "  → In-Kernel-Modul aktiv (DKMS evtl. überflüssig)";;
@@ -221,7 +248,6 @@ if modinfo snd_hda_codec_cs8409 &>/dev/null; then
 else
   echo "  (modinfo nicht verfügbar)"
 fi
-
 echo
 echo "WLAN (Firmware-Quelle):"
 if dpkg -S /lib/firmware/brcm/brcmfmac4364b2-pcie.bin >/dev/null 2>&1 || \
@@ -232,3 +258,10 @@ else
 fi
 echo
 ok "Fertig."
+
+# NEU: Reboot-Abfrage nach Audio
+if [[ "$AUDIO_RAN" = "1" ]]; then
+  echo
+  read -r -p "Um Audio vollständig zu aktivieren, jetzt neu starten? [y/N]: " rn
+  if [[ "${rn:-N}" =~ ^[Yy]$ ]]; then reboot; fi
+fi
